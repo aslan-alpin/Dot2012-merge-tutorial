@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using UnityEngine.Serialization;
+using UnityEngine.XR;
 
 namespace UnityEngine.XR.Hands.Samples.VisualizerSample
 {
@@ -183,7 +184,10 @@ namespace UnityEngine.XR.Hands.Samples.VisualizerSample
         protected void Update()
         {
             if (m_Subsystem != null && m_Subsystem.running)
+            {
+                UpdateControllerFallbackVisuals();
                 return;
+            }
 
             SubsystemManager.GetSubsystems(s_SubsystemsReuse);
             var foundRunningHandSubsystem = false;
@@ -244,6 +248,7 @@ namespace UnityEngine.XR.Hands.Samples.VisualizerSample
             m_PreviousVelocityType = m_VelocityType;
 
             SubscribeHandSubsystem();
+            UpdateControllerFallbackVisuals();
         }
 
         void SubscribeHandSubsystem()
@@ -271,9 +276,24 @@ namespace UnityEngine.XR.Hands.Samples.VisualizerSample
             if (handGameObjects == null)
                 return;
 
-            handGameObjects.ToggleDrawMesh(m_DrawMeshes);
+            handGameObjects.ToggleDrawMesh(m_DrawMeshes && (isTracked || handGameObjects.HasTrackedControllerPose()));
             handGameObjects.ToggleDebugDrawJoints(m_DebugDrawJoints && isTracked);
             handGameObjects.SetVelocityType(isTracked ? m_VelocityType : VelocityType.None);
+        }
+
+        void UpdateControllerFallbackVisuals()
+        {
+            if (m_LeftHandGameObjects != null && (m_Subsystem == null || !m_Subsystem.leftHand.isTracked))
+            {
+                UpdateRenderingVisibility(m_LeftHandGameObjects, false);
+                m_LeftHandGameObjects.TryUpdateFromController();
+            }
+
+            if (m_RightHandGameObjects != null && (m_Subsystem == null || !m_Subsystem.rightHand.isTracked))
+            {
+                UpdateRenderingVisibility(m_RightHandGameObjects, false);
+                m_RightHandGameObjects.TryUpdateFromController();
+            }
         }
 
         void OnTrackingAcquired(XRHand hand)
@@ -336,17 +356,31 @@ namespace UnityEngine.XR.Hands.Samples.VisualizerSample
                 m_PreviousVelocityType = m_VelocityType;
             }
 
-            m_LeftHandGameObjects.UpdateJoints(
-                subsystem.leftHand,
-                (updateSuccessFlags & XRHandSubsystem.UpdateSuccessFlags.LeftHandJoints) != 0,
-                m_DebugDrawJoints,
-                m_VelocityType);
+            if (leftHandTracked)
+            {
+                m_LeftHandGameObjects.UpdateJoints(
+                    subsystem.leftHand,
+                    (updateSuccessFlags & XRHandSubsystem.UpdateSuccessFlags.LeftHandJoints) != 0,
+                    m_DebugDrawJoints,
+                    m_VelocityType);
+            }
+            else
+            {
+                m_LeftHandGameObjects.TryUpdateFromController();
+            }
 
-            m_RightHandGameObjects.UpdateJoints(
-                subsystem.rightHand,
-                (updateSuccessFlags & XRHandSubsystem.UpdateSuccessFlags.RightHandJoints) != 0,
-                m_DebugDrawJoints,
-                m_VelocityType);
+            if (rightHandTracked)
+            {
+                m_RightHandGameObjects.UpdateJoints(
+                    subsystem.rightHand,
+                    (updateSuccessFlags & XRHandSubsystem.UpdateSuccessFlags.RightHandJoints) != 0,
+                    m_DebugDrawJoints,
+                    m_VelocityType);
+            }
+            else
+            {
+                m_RightHandGameObjects.TryUpdateFromController();
+            }
         }
 
         class HandGameObjects
@@ -361,6 +395,9 @@ namespace UnityEngine.XR.Hands.Samples.VisualizerSample
 
             static Vector3[] s_LinePointsReuse = new Vector3[2];
             XRHandMeshController m_MeshController;
+            XRHandSkeletonDriver m_SkeletonDriver;
+            readonly Handedness m_Handedness;
+            readonly Dictionary<XRHandJointID, Quaternion> m_InitialJointRotations = new Dictionary<XRHandJointID, Quaternion>();
             const float k_LineWidth = 0.005f;
 
             public HandGameObjects(
@@ -393,6 +430,7 @@ namespace UnityEngine.XR.Hands.Samples.VisualizerSample
                         m_JointVisualizers[jointIndex] = jointVisualizer;
                 }
 
+                m_Handedness = handedness;
                 var isSceneObject = meshPrefab.scene.IsValid();
                 m_HandRoot = isSceneObject ? meshPrefab : Instantiate(meshPrefab, parent);
                 m_HandRoot.SetActive(false); // Deactivate so that added components do not run OnEnable before they are finished being set up
@@ -422,16 +460,19 @@ namespace UnityEngine.XR.Hands.Samples.VisualizerSample
                     m_MeshController.handTrackingEvents = handEvents;
                 }
 
+                m_MeshController.showMeshWhenTrackingIsAcquired = true;
+                m_MeshController.hideMeshWhenTrackingIsLost = false;
+
                 if (meshMaterial != null)
                 {
                     m_MeshController.handMeshRenderer.sharedMaterial = meshMaterial;
                 }
 
-                var skeletonDriver = m_HandRoot.GetComponent<XRHandSkeletonDriver>();
-                if (skeletonDriver == null)
+                m_SkeletonDriver = m_HandRoot.GetComponent<XRHandSkeletonDriver>();
+                if (m_SkeletonDriver == null)
                 {
-                    skeletonDriver = m_HandRoot.AddComponent<XRHandSkeletonDriver>();
-                    skeletonDriver.jointTransformReferences = new List<JointToTransformReference>();
+                    m_SkeletonDriver = m_HandRoot.AddComponent<XRHandSkeletonDriver>();
+                    m_SkeletonDriver.jointTransformReferences = new List<JointToTransformReference>();
                     Transform root = null;
                     for (var childIndex = 0; childIndex < m_HandRoot.transform.childCount; ++childIndex)
                     {
@@ -440,10 +481,10 @@ namespace UnityEngine.XR.Hands.Samples.VisualizerSample
                             root = child;
                     }
 
-                    skeletonDriver.rootTransform = root;
-                    XRHandSkeletonDriverUtility.FindJointsFromRoot(skeletonDriver);
-                    skeletonDriver.InitializeFromSerializedReferences();
-                    skeletonDriver.handTrackingEvents = handEvents;
+                    m_SkeletonDriver.rootTransform = root;
+                    XRHandSkeletonDriverUtility.FindJointsFromRoot(m_SkeletonDriver);
+                    m_SkeletonDriver.InitializeFromSerializedReferences();
+                    m_SkeletonDriver.handTrackingEvents = handEvents;
                 }
 
                 m_DrawJointsParent = new GameObject();
@@ -452,12 +493,14 @@ namespace UnityEngine.XR.Hands.Samples.VisualizerSample
                 m_DrawJointsParent.transform.localRotation = Quaternion.identity;
                 m_DrawJointsParent.name = handedness + "HandDebugDrawJoints";
 
-                for (var i = 0; i < skeletonDriver.jointTransformReferences.Count; i++)
+                for (var i = 0; i < m_SkeletonDriver.jointTransformReferences.Count; i++)
                 {
-                    var jointTransformReference = skeletonDriver.jointTransformReferences[i];
+                    var jointTransformReference = m_SkeletonDriver.jointTransformReferences[i];
                     var jointTransform = jointTransformReference.jointTransform;
                     var jointID = jointTransformReference.xrHandJointID;
                     AssignJoint(jointID, jointTransform, m_DrawJointsParent.transform);
+                    if (jointTransform != null)
+                        m_InitialJointRotations[jointID] = jointTransform.localRotation;
                 }
 
                 m_HandRoot.SetActive(true);
@@ -486,9 +529,12 @@ namespace UnityEngine.XR.Hands.Samples.VisualizerSample
 
             public void ToggleDrawMesh(bool drawMesh)
             {
+                if (m_MeshController == null)
+                    return;
+
                 m_MeshController.enabled = drawMesh;
-                if (!drawMesh)
-                    m_MeshController.handMeshRenderer.enabled = false;
+                if (m_MeshController.handMeshRenderer != null)
+                    m_MeshController.handMeshRenderer.enabled = drawMesh;
             }
 
             public void ToggleDebugDrawJoints(bool debugDrawJoints)
@@ -508,12 +554,83 @@ namespace UnityEngine.XR.Hands.Samples.VisualizerSample
                     ToggleRenderers<LineRenderer>(velocityType != VelocityType.None, m_VelocityParents[jointIndex].transform);
             }
 
+            public bool HasTrackedControllerPose()
+            {
+                var device = InputDevices.GetDeviceAtXRNode(m_Handedness == Handedness.Left ? XRNode.LeftHand : XRNode.RightHand);
+                if (!device.isValid)
+                    return false;
+
+                if (device.TryGetFeatureValue(CommonUsages.isTracked, out var isTracked) && !isTracked)
+                    return false;
+
+                return device.TryGetFeatureValue(CommonUsages.devicePosition, out _) ||
+                       device.TryGetFeatureValue(CommonUsages.deviceRotation, out _);
+            }
+
+            public bool TryUpdateFromController()
+            {
+                if (m_HandRoot == null)
+                    return false;
+
+                var node = m_Handedness == Handedness.Left ? XRNode.LeftHand : XRNode.RightHand;
+                var device = InputDevices.GetDeviceAtXRNode(node);
+                if (!device.isValid)
+                    return false;
+
+                if (device.TryGetFeatureValue(CommonUsages.isTracked, out var isTracked) && !isTracked)
+                    return false;
+
+                var gotPosition = device.TryGetFeatureValue(CommonUsages.devicePosition, out var position);
+                var gotRotation = device.TryGetFeatureValue(CommonUsages.deviceRotation, out var rotation);
+                if (!gotPosition && !gotRotation)
+                    return false;
+
+                if (m_SkeletonDriver != null)
+                    m_SkeletonDriver.enabled = false;
+
+                if (gotPosition)
+                    m_HandRoot.transform.localPosition = position;
+                if (gotRotation)
+                    m_HandRoot.transform.localRotation = rotation;
+
+                if (m_MeshController != null && m_MeshController.handMeshRenderer != null && m_MeshController.enabled)
+                    m_MeshController.handMeshRenderer.enabled = true;
+
+                var grip = ReadAnalog(device, CommonUsages.grip, CommonUsages.gripButton);
+                var trigger = ReadAnalog(device, CommonUsages.trigger, CommonUsages.triggerButton);
+                var gripDrivenCurl = Mathf.Clamp01(grip);
+                var triggerDrivenCurl = Mathf.Clamp01(trigger);
+                var thumbCurl = Mathf.Clamp01(grip);
+
+                for (var i = 0; i < m_SkeletonDriver.jointTransformReferences.Count; i++)
+                {
+                    var jointRef = m_SkeletonDriver.jointTransformReferences[i];
+                    var jointTransform = jointRef.jointTransform;
+                    if (jointTransform == null)
+                        continue;
+
+                    if (!m_InitialJointRotations.TryGetValue(jointRef.xrHandJointID, out var initialRotation))
+                        continue;
+
+                    jointTransform.localRotation = initialRotation * GetControllerJointRotationOffset(
+                        jointRef.xrHandJointID,
+                        triggerDrivenCurl,
+                        gripDrivenCurl,
+                        thumbCurl);
+                }
+
+                return true;
+            }
+
             public void UpdateJoints(
                 XRHand hand,
                 bool areJointsTracked,
                 bool debugDrawJoints,
                 VelocityType velocityType)
             {
+                if (m_SkeletonDriver != null)
+                    m_SkeletonDriver.enabled = true;
+
                 if (!areJointsTracked)
                     return;
 
@@ -602,6 +719,80 @@ namespace UnityEngine.XR.Hands.Samples.VisualizerSample
 
                 for (var childIndex = 0; childIndex < rendererTransform.childCount; ++childIndex)
                     ToggleRenderers<TRenderer>(toggle, rendererTransform.GetChild(childIndex));
+            }
+
+            static float ReadAnalog(InputDevice device, InputFeatureUsage<float> analogUsage, InputFeatureUsage<bool> buttonUsage)
+            {
+                var analog = 0f;
+                if (!device.TryGetFeatureValue(analogUsage, out analog))
+                    analog = 0f;
+
+                if (device.TryGetFeatureValue(buttonUsage, out var pressed) && pressed)
+                    analog = Mathf.Max(analog, 1f);
+
+                return analog;
+            }
+
+            static Quaternion GetControllerJointRotationOffset(
+                XRHandJointID jointId,
+                float triggerCurl,
+                float gripCurl,
+                float thumbCurl)
+            {
+                if (jointId >= XRHandJointID.IndexMetacarpal && jointId <= XRHandJointID.IndexTip)
+                    return Quaternion.Euler(GetFingerCurlAngle(jointId, triggerCurl), 0f, 0f);
+
+                if (jointId >= XRHandJointID.MiddleMetacarpal && jointId <= XRHandJointID.LittleTip)
+                    return Quaternion.Euler(GetFingerCurlAngle(jointId, gripCurl), 0f, 0f);
+
+                if (jointId >= XRHandJointID.ThumbMetacarpal && jointId <= XRHandJointID.ThumbTip)
+                    return Quaternion.Euler(GetThumbCurlAngle(jointId, thumbCurl), 0f, 0f);
+
+                return Quaternion.identity;
+            }
+
+            static float GetFingerCurlAngle(XRHandJointID jointId, float curl)
+            {
+                var angle = jointId switch
+                {
+                    XRHandJointID.IndexMetacarpal => 6f,
+                    XRHandJointID.MiddleMetacarpal => 5f,
+                    XRHandJointID.RingMetacarpal => 5f,
+                    XRHandJointID.LittleMetacarpal => 8f,
+                    XRHandJointID.IndexProximal => 42f,
+                    XRHandJointID.MiddleProximal => 46f,
+                    XRHandJointID.RingProximal => 48f,
+                    XRHandJointID.LittleProximal => 54f,
+                    XRHandJointID.IndexIntermediate => 58f,
+                    XRHandJointID.MiddleIntermediate => 64f,
+                    XRHandJointID.RingIntermediate => 66f,
+                    XRHandJointID.LittleIntermediate => 70f,
+                    XRHandJointID.IndexDistal => 70f,
+                    XRHandJointID.MiddleDistal => 74f,
+                    XRHandJointID.RingDistal => 76f,
+                    XRHandJointID.LittleDistal => 82f,
+                    XRHandJointID.IndexTip => 14f,
+                    XRHandJointID.MiddleTip => 12f,
+                    XRHandJointID.RingTip => 12f,
+                    XRHandJointID.LittleTip => 14f,
+                    _ => 0f,
+                };
+
+                return curl * angle;
+            }
+
+            static float GetThumbCurlAngle(XRHandJointID jointId, float curl)
+            {
+                var angle = jointId switch
+                {
+                    XRHandJointID.ThumbMetacarpal => 12f,
+                    XRHandJointID.ThumbProximal => 24f,
+                    XRHandJointID.ThumbDistal => 34f,
+                    XRHandJointID.ThumbTip => 12f,
+                    _ => 0f,
+                };
+
+                return curl * angle;
             }
         }
     }
