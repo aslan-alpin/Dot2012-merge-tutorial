@@ -21,7 +21,8 @@ using VRCombat.Combat;
 using VRCombat.Enemies;
 using VRCombat.Player;
 using VRCombat.UI;
-using InputDevice = UnityEngine.XR.InputDevice;
+using XRCommonUsages = UnityEngine.XR.CommonUsages;
+using XRInputDevice = UnityEngine.XR.InputDevice;
 
 namespace VRCombat.Core
 {
@@ -168,8 +169,8 @@ namespace VRCombat.Core
         readonly List<Renderer> m_RightSuppressedHandRenderers = new List<Renderer>();
         readonly List<Collider> m_LeftSuppressedHandColliders = new List<Collider>();
         readonly List<Collider> m_RightSuppressedHandColliders = new List<Collider>();
-        static readonly List<InputDevice> s_HandDeviceBuffer = new List<InputDevice>(4);
-        static readonly List<InputDevice> s_ControllerDeviceBuffer = new List<InputDevice>(4);
+        static readonly List<XRInputDevice> s_HandDeviceBuffer = new List<XRInputDevice>(4);
+        static readonly List<XRInputDevice> s_ControllerDeviceBuffer = new List<XRInputDevice>(4);
         static readonly RaycastHit[] s_ScenePickupSupportHits = new RaycastHit[16];
         static readonly RaycastHit[] s_PlayerGroundHitBuffer = new RaycastHit[16];
         Coroutine m_DeathFlowRoutine;
@@ -1136,7 +1137,7 @@ namespace VRCombat.Core
                 if (!device.isValid)
                     continue;
 
-                if (device.TryGetFeatureValue(CommonUsages.isTracked, out var isTracked) && isTracked)
+                if (device.TryGetFeatureValue(XRCommonUsages.isTracked, out var isTracked) && isTracked)
                     return true;
             }
 
@@ -1158,7 +1159,7 @@ namespace VRCombat.Core
                 if (!device.isValid)
                     continue;
 
-                if (device.TryGetFeatureValue(CommonUsages.isTracked, out var isTracked) && isTracked)
+                if (device.TryGetFeatureValue(XRCommonUsages.isTracked, out var isTracked) && isTracked)
                     return true;
             }
 
@@ -1176,7 +1177,7 @@ namespace VRCombat.Core
                 if (!device.isValid)
                     continue;
 
-                if (device.TryGetFeatureValue(CommonUsages.isTracked, out var isTracked) && !isTracked)
+                if (device.TryGetFeatureValue(XRCommonUsages.isTracked, out var isTracked) && !isTracked)
                     continue;
 
                 if ((device.characteristics & InputDeviceCharacteristics.HandTracking) != 0)
@@ -1192,7 +1193,7 @@ namespace VRCombat.Core
             InputDeviceCharacteristics handednessFlag,
             XRNode handNode,
             Transform controllerTransform,
-            out InputDevice resolvedDevice)
+            out XRInputDevice resolvedDevice)
         {
             resolvedDevice = default;
 
@@ -1220,7 +1221,7 @@ namespace VRCombat.Core
             return resolvedDevice.isValid;
         }
 
-        static bool TryGetClosestDeviceToTransform(List<InputDevice> devices, Transform targetTransform, out InputDevice resolvedDevice)
+        static bool TryGetClosestDeviceToTransform(List<XRInputDevice> devices, Transform targetTransform, out XRInputDevice resolvedDevice)
         {
             resolvedDevice = default;
             if (devices == null || devices.Count == 0 || targetTransform == null)
@@ -1234,10 +1235,10 @@ namespace VRCombat.Core
                 if (!device.isValid)
                     continue;
 
-                if (device.TryGetFeatureValue(CommonUsages.isTracked, out var isTracked) && !isTracked)
+                if (device.TryGetFeatureValue(XRCommonUsages.isTracked, out var isTracked) && !isTracked)
                     continue;
 
-                if (!device.TryGetFeatureValue(CommonUsages.devicePosition, out var devicePosition))
+                if (!device.TryGetFeatureValue(XRCommonUsages.devicePosition, out var devicePosition))
                     continue;
 
                 var distance = (devicePosition - targetTransform.position).sqrMagnitude;
@@ -1513,7 +1514,7 @@ namespace VRCombat.Core
             var inputSystemLeft = UnityEngine.InputSystem.XR.XRController.leftHand;
             var hasInputSystemMenuControl = HasInputSystemPauseMenuControl(inputSystemLeft);
 
-            var xrDevices = new List<InputDevice>();
+            var xrDevices = new List<XRInputDevice>();
             InputDevices.GetDevices(xrDevices);
             var xrDeviceSummary = new StringBuilder();
             for (var i = 0; i < xrDevices.Count; i++)
@@ -1680,10 +1681,10 @@ namespace VRCombat.Core
         {
             var device = InputDevices.GetDeviceAtXRNode(handNode);
             if (device.isValid &&
-                (!device.TryGetFeatureValue(CommonUsages.isTracked, out var isTracked) || isTracked))
+                (!device.TryGetFeatureValue(XRCommonUsages.isTracked, out var isTracked) || isTracked))
             {
-                var gotPosition = device.TryGetFeatureValue(CommonUsages.devicePosition, out position);
-                var gotRotation = device.TryGetFeatureValue(CommonUsages.deviceRotation, out rotation);
+                var gotPosition = device.TryGetFeatureValue(XRCommonUsages.devicePosition, out position);
+                var gotRotation = device.TryGetFeatureValue(XRCommonUsages.deviceRotation, out rotation);
                 if (gotPosition || gotRotation)
                 {
                     if (!gotPosition && controllerTransform != null)
@@ -1726,11 +1727,11 @@ namespace VRCombat.Core
                 if (!controllerDevice.isValid)
                     continue;
 
-                if (controllerDevice.TryGetFeatureValue(CommonUsages.isTracked, out var isTracked) && !isTracked)
+                if (controllerDevice.TryGetFeatureValue(XRCommonUsages.isTracked, out var isTracked) && !isTracked)
                     continue;
 
-                var gotPosition = controllerDevice.TryGetFeatureValue(CommonUsages.devicePosition, out position);
-                var gotRotation = controllerDevice.TryGetFeatureValue(CommonUsages.deviceRotation, out rotation);
+                var gotPosition = controllerDevice.TryGetFeatureValue(XRCommonUsages.devicePosition, out position);
+                var gotRotation = controllerDevice.TryGetFeatureValue(XRCommonUsages.deviceRotation, out rotation);
                 if (gotPosition || gotRotation)
                 {
                     if (!gotPosition && controllerTransform != null)
@@ -1750,11 +1751,11 @@ namespace VRCombat.Core
                 if (!trackedDevice.isValid)
                     continue;
 
-                if (trackedDevice.TryGetFeatureValue(CommonUsages.isTracked, out var isTracked) && !isTracked)
+                if (trackedDevice.TryGetFeatureValue(XRCommonUsages.isTracked, out var isTracked) && !isTracked)
                     continue;
 
-                var gotPosition = trackedDevice.TryGetFeatureValue(CommonUsages.devicePosition, out position);
-                var gotRotation = trackedDevice.TryGetFeatureValue(CommonUsages.deviceRotation, out rotation);
+                var gotPosition = trackedDevice.TryGetFeatureValue(XRCommonUsages.devicePosition, out position);
+                var gotRotation = trackedDevice.TryGetFeatureValue(XRCommonUsages.deviceRotation, out rotation);
                 if (gotPosition || gotRotation)
                 {
                     if (!gotPosition && controllerTransform != null)
@@ -1774,33 +1775,33 @@ namespace VRCombat.Core
             if (!device.isValid)
                 return false;
 
-            if (device.TryGetFeatureValue(CommonUsages.primaryButton, out var primaryPressed) && primaryPressed)
+            if (device.TryGetFeatureValue(XRCommonUsages.primaryButton, out var primaryPressed) && primaryPressed)
                 return true;
 
-            if (device.TryGetFeatureValue(CommonUsages.secondaryButton, out var secondaryPressed) && secondaryPressed)
+            if (device.TryGetFeatureValue(XRCommonUsages.secondaryButton, out var secondaryPressed) && secondaryPressed)
                 return true;
 
             return false;
         }
 
-        static bool HasMenuSpecificButtonUsage(InputDevice device)
+        static bool HasMenuSpecificButtonUsage(XRInputDevice device)
         {
             if (!device.isValid)
                 return false;
 
-            return device.TryGetFeatureValue(CommonUsages.menuButton, out _)
+            return device.TryGetFeatureValue(XRCommonUsages.menuButton, out _)
                 || device.TryGetFeatureValue(new InputFeatureUsage<bool>("menu"), out _)
                 || device.TryGetFeatureValue(new InputFeatureUsage<bool>("applicationMenu"), out _)
                 || device.TryGetFeatureValue(new InputFeatureUsage<bool>("appMenuButton"), out _)
                 || device.TryGetFeatureValue(new InputFeatureUsage<bool>("start"), out _);
         }
 
-        static bool IsMenuSpecificButtonPressed(InputDevice device)
+        static bool IsMenuSpecificButtonPressed(XRInputDevice device)
         {
             if (!device.isValid)
                 return false;
 
-            if (device.TryGetFeatureValue(CommonUsages.menuButton, out var menuPressed) && menuPressed)
+            if (device.TryGetFeatureValue(XRCommonUsages.menuButton, out var menuPressed) && menuPressed)
                 return true;
 
             if (device.TryGetFeatureValue(new InputFeatureUsage<bool>("menu"), out var menuPressedByName) && menuPressedByName)
@@ -1818,15 +1819,15 @@ namespace VRCombat.Core
             return false;
         }
 
-        static bool IsPauseFallbackFaceButtonPressed(InputDevice device)
+        static bool IsPauseFallbackFaceButtonPressed(XRInputDevice device)
         {
             if (!device.isValid || HasMenuSpecificButtonUsage(device))
                 return false;
 
-            if (device.TryGetFeatureValue(CommonUsages.secondaryButton, out var secondaryPressed) && secondaryPressed)
+            if (device.TryGetFeatureValue(XRCommonUsages.secondaryButton, out var secondaryPressed) && secondaryPressed)
                 return true;
 
-            if (device.TryGetFeatureValue(CommonUsages.primaryButton, out var primaryPressed) && primaryPressed)
+            if (device.TryGetFeatureValue(XRCommonUsages.primaryButton, out var primaryPressed) && primaryPressed)
                 return true;
 
             return false;
