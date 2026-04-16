@@ -660,8 +660,12 @@ PrefabInstance:
       value: Flintlock
       objectReference: {fileID: 0}
     - target: {fileID: 8338642558503055089, guid: 0019d0cc92ddc4fb9a1d2fbf7529eba0, type: 3}
+      propertyPath: m_LocalPosition.x
+      value: 0.065
+      objectReference: {fileID: 0}
+    - target: {fileID: 8338642558503055089, guid: 0019d0cc92ddc4fb9a1d2fbf7529eba0, type: 3}
       propertyPath: m_LocalPosition.z
-      value: 1.46
+      value: 0
       objectReference: {fileID: 0}
     m_RemovedComponents: []
     m_RemovedGameObjects: []
@@ -724,6 +728,12 @@ MonoBehaviour:
   triggerEndRotation: {x: -30, y: 0, z: 0}
   m_FireThreshold: 0.72
   muzzleFlash: {fileID: 0}
+  m_ProjectileTemplate: {fileID: 0}
+  m_ProjectileSpeed: 30
+  m_ProjectileLifetime: 6
+  m_ReloadDuration: 0.8
+  m_FireSfxClip: {fileID: 8300000, guid: 3f531de69a1a34c7396714d79bc2062c, type: 3}
+  m_ReloadSfxClip: {fileID: 8300000, guid: 60aad723bf2e94778b3a853677691b17, type: 3}
 --- !u!114 &773097877
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -899,7 +909,7 @@ BoxCollider:
   m_ProvidesContacts: 0
   m_Enabled: 1
   serializedVersion: 3
-  m_Size: {x: 0.5, y: 0.2, z: 0.2}
+  m_Size: {x: 0.2, y: 0.1, z: 0.05}
   m_Center: {x: 0, y: 0, z: 0}
 --- !u!1 &773097880
 GameObject:
@@ -961,13 +971,13 @@ Transform:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 773097883}
   serializedVersion: 2
-  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 0, y: 0.0157, z: 0.1394}
+  m_LocalRotation: {x: 0, y: 0.7071068, z: 0, w: 0.7071068}
+  m_LocalPosition: {x: 0.1, y: 0.0157, z: 0}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
   m_Father: {fileID: 773097882}
-  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 90, z: 0}
 --- !u!1 &817075155
 GameObject:
   m_ObjectHideFlags: 0
@@ -1415,6 +1425,14 @@ PrefabInstance:
       propertyPath: m_IsActive
       value: 1
       objectReference: {fileID: 0}
+    - target: {fileID: 4412248471636014729, guid: 77e7c27b2c5525e4aa8cc9f99d654486, type: 3}
+      propertyPath: m_LeftController
+      value: 
+      objectReference: {fileID: 757950445636073681, guid: ffd656bf2a3ba3d41b1e4a94b81b7c85, type: 3}
+    - target: {fileID: 4412248471636014729, guid: 77e7c27b2c5525e4aa8cc9f99d654486, type: 3}
+      propertyPath: m_RightController
+      value: 
+      objectReference: {fileID: 1768957577311777180, guid: 89e80c47615e4f043926d66492d3ca5f, type: 3}
     - target: {fileID: 4750419573833148737, guid: 77e7c27b2c5525e4aa8cc9f99d654486, type: 3}
       propertyPath: m_Layer
       value: 3

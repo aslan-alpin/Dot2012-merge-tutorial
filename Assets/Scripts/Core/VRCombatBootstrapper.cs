@@ -165,6 +165,7 @@ namespace VRCombat.Core
         readonly List<GameObject> m_RuntimeSpawnedObjects = new List<GameObject>();
         readonly List<Collider> m_ArenaSurfaceColliders = new List<Collider>();
         readonly Dictionary<XRGrabInteractable, HandSide> m_EquippedHandByPickup = new Dictionary<XRGrabInteractable, HandSide>();
+        readonly HashSet<XRGrabInteractable> m_CombatPickupListenerRegistrations = new HashSet<XRGrabInteractable>();
         readonly List<Renderer> m_LeftSuppressedHandRenderers = new List<Renderer>();
         readonly List<Renderer> m_RightSuppressedHandRenderers = new List<Renderer>();
         readonly List<Collider> m_LeftSuppressedHandColliders = new List<Collider>();
@@ -1311,7 +1312,9 @@ namespace VRCombat.Core
         bool ConsumeMenuButtonPress()
         {
             var runtimeActionPressed = ReadRuntimePauseMenuActionDown();
-            var rawMenuPressed = ConsumeMetaMenuGesturePress();
+            var rawMenuPressed = ReadRawMenuButtonDown()
+                || ReadGenericInputSystemPauseButtonDown()
+                || ConsumeMetaMenuGesturePress();
 #if DEVELOPMENT_BUILD || UNITY_EDITOR
             LogPauseAttemptDiagnostics(runtimeActionPressed, rawMenuPressed);
 #endif
@@ -1340,17 +1343,41 @@ namespace VRCombat.Core
 
                 UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<XRController>{LeftHand}/menu");
                 UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<XRController>{LeftHand}/menuButton");
+                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<XRController>{LeftHand}/systemButton");
                 UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<XRController>{LeftHand}/start");
                 UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<OculusTouchController>{LeftHand}/menu");
                 UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<OculusTouchController>{LeftHand}/menuButton");
+                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<OculusTouchController>{LeftHand}/systemButton");
                 UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<OculusTouchController>{LeftHand}/start");
+                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<QuestTouchPlusController>{LeftHand}/menu");
+                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<QuestTouchPlusController>{LeftHand}/menuButton");
+                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<QuestTouchPlusController>{LeftHand}/systemButton");
+                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<QuestTouchPlusController>{LeftHand}/start");
+                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<QuestProTouchController>{LeftHand}/menu");
+                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<QuestProTouchController>{LeftHand}/menuButton");
+                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<QuestProTouchController>{LeftHand}/systemButton");
+                // Quest 3 Touch Plus specific - secondaryButton is the hamburger/menu button on left controller
                 UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<XRController>{LeftHand}/secondaryButton");
                 UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<OculusTouchController>{LeftHand}/secondaryButton");
+                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<QuestTouchPlusController>{LeftHand}/secondaryButton");
+                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<MetaQuestTouchPlusController>{LeftHand}/menu");
+                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<MetaQuestTouchPlusController>{LeftHand}/menuButton");
+                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<MetaQuestTouchPlusController>{LeftHand}/secondaryButton");
+                // Thumbstick click fallback
+                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<XRController>{LeftHand}/primary2DAxisClick");
+                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<XRController>{LeftHand}/thumbstickClicked");
+                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<OculusTouchController>{LeftHand}/primary2DAxisClick");
+                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<OculusTouchController>{LeftHand}/thumbstickClicked");
+                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<QuestTouchPlusController>{LeftHand}/primary2DAxisClick");
+                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<QuestTouchPlusController>{LeftHand}/thumbstickClicked");
+                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<QuestProTouchController>{LeftHand}/primary2DAxisClick");
+                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<QuestProTouchController>{LeftHand}/thumbstickClicked");
             }
 
             if (!m_RuntimePauseMenuAction.enabled)
                 m_RuntimePauseMenuAction.Enable();
 
+            ConfigureMetaControllerButtonsMapperPauseBinding();
             RebindMetaMenuGestureDetector();
             m_PendingMetaMenuGesture = false;
         }
@@ -1385,7 +1412,7 @@ namespace VRCombat.Core
                 var pauseAction = new ControllerButtonsMapper.ButtonClickAction
                 {
                     Title = PauseMapperActionTitle,
-                    Button = OVRInput.Button.Start,
+                    Button = OVRInput.Button.PrimaryThumbstick,
                     ButtonMode = ControllerButtonsMapper.ButtonClickAction.ButtonClickMode.OnButtonDown,
                     Callback = callbackEvent
                 };
@@ -1423,7 +1450,78 @@ namespace VRCombat.Core
             if (m_RuntimePauseMenuAction == null)
                 SetupPauseMenuInputActions();
 
-            return m_RuntimePauseMenuAction != null && m_RuntimePauseMenuAction.WasPressedThisFrame();
+            return m_RuntimePauseMenuAction != null &&
+                (m_RuntimePauseMenuAction.WasPressedThisFrame() || m_RuntimePauseMenuAction.WasPerformedThisFrame());
+        }
+
+        bool ReadGenericInputSystemPauseButtonDown()
+        {
+            var inputSystemDevices = UnityEngine.InputSystem.InputSystem.devices;
+            for (var i = 0; i < inputSystemDevices.Count; i++)
+            {
+                var device = inputSystemDevices[i];
+                if (device == null || !device.added)
+                    continue;
+
+                if (WasAnyMenuControlPressedThisFrame(device))
+                    return true;
+
+                if (IsLikelyLeftHandInputSystemDevice(device) && WasAnyThumbstickPauseControlPressedThisFrame(device))
+                    return true;
+            }
+
+            return false;
+        }
+
+        static bool WasAnyMenuControlPressedThisFrame(UnityEngine.InputSystem.InputDevice device)
+        {
+            return WasInputSystemButtonPressedThisFrame(device, "menu")
+                || WasInputSystemButtonPressedThisFrame(device, "menuButton")
+                || WasInputSystemButtonPressedThisFrame(device, "systemButton")
+                || WasInputSystemButtonPressedThisFrame(device, "start");
+        }
+
+        static bool WasAnyThumbstickPauseControlPressedThisFrame(UnityEngine.InputSystem.InputDevice device)
+        {
+            return WasInputSystemButtonPressedThisFrame(device, "primary2DAxisClick")
+                || WasInputSystemButtonPressedThisFrame(device, "thumbstickClicked")
+                || WasInputSystemButtonPressedThisFrame(device, "joystickClicked");
+        }
+
+        static bool WasInputSystemButtonPressedThisFrame(UnityEngine.InputSystem.InputDevice device, string controlPath)
+        {
+            if (device == null || !device.added || string.IsNullOrWhiteSpace(controlPath))
+                return false;
+
+            var buttonControl = device.TryGetChildControl<UnityEngine.InputSystem.Controls.ButtonControl>(controlPath);
+            return buttonControl != null && buttonControl.wasPressedThisFrame;
+        }
+
+        static bool HasInputSystemUsage(UnityEngine.InputSystem.InputDevice device, string usageName)
+        {
+            if (device == null || string.IsNullOrWhiteSpace(usageName))
+                return false;
+
+            var usages = device.usages;
+            for (var i = 0; i < usages.Count; i++)
+            {
+                if (string.Equals(usages[i].ToString(), usageName, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+
+            return false;
+        }
+
+        static bool IsLikelyLeftHandInputSystemDevice(UnityEngine.InputSystem.InputDevice device)
+        {
+            if (device == null)
+                return false;
+
+            if (HasInputSystemUsage(device, "LeftHand"))
+                return true;
+
+            var descriptor = $"{device.displayName} {device.name} {device.layout}";
+            return descriptor.IndexOf("left", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         bool ConsumeMetaMenuGesturePress()
@@ -1482,16 +1580,15 @@ namespace VRCombat.Core
         {
             return HasInputSystemButtonControl(device, "menu")
                 || HasInputSystemButtonControl(device, "menuButton")
+                || HasInputSystemButtonControl(device, "systemButton")
                 || HasInputSystemButtonControl(device, "start");
         }
 
         static bool IsInputSystemPauseFallbackPressed(UnityEngine.InputSystem.InputDevice device)
         {
-            if (HasInputSystemPauseMenuControl(device))
-                return false;
-
-            return IsInputSystemButtonPressed(device, "secondaryButton")
-                || IsInputSystemButtonPressed(device, "primaryButton");
+            return IsInputSystemButtonPressed(device, "primary2DAxisClick")
+                || IsInputSystemButtonPressed(device, "thumbstickClicked")
+                || IsInputSystemButtonPressed(device, "joystickClicked");
         }
 
         void LogPauseInputDiagnosticsAtStartup()
@@ -1556,7 +1653,7 @@ namespace VRCombat.Core
                     m_LeftControllerTransform,
                     out var resolvedLeftDevice))
             {
-                if (IsMenuSpecificButtonPressed(resolvedLeftDevice) || IsPauseFallbackFaceButtonPressed(resolvedLeftDevice))
+                if (IsMenuSpecificButtonPressed(resolvedLeftDevice) || IsPauseFallbackThumbstickPressed(resolvedLeftDevice))
                     return true;
             }
 
@@ -1568,7 +1665,7 @@ namespace VRCombat.Core
                 return true;
             }
 
-            if (IsAnyPauseFallbackFaceButtonPressed(
+            if (IsAnyPauseFallbackThumbstickPressed(
                     InputDeviceCharacteristics.Left |
                     InputDeviceCharacteristics.Controller |
                     InputDeviceCharacteristics.TrackedDevice))
@@ -1586,6 +1683,7 @@ namespace VRCombat.Core
             var left = UnityEngine.InputSystem.XR.XRController.leftHand;
             if (IsInputSystemButtonPressed(left, "menu")
                 || IsInputSystemButtonPressed(left, "menuButton")
+                || IsInputSystemButtonPressed(left, "systemButton")
                 || IsInputSystemButtonPressed(left, "start")
                 || IsInputSystemPauseFallbackPressed(left))
             {
@@ -1605,6 +1703,7 @@ namespace VRCombat.Core
 
                 if (IsInputSystemButtonPressed(device, "menu")
                     || IsInputSystemButtonPressed(device, "menuButton")
+                    || IsInputSystemButtonPressed(device, "systemButton")
                     || IsInputSystemButtonPressed(device, "start")
                     || IsInputSystemPauseFallbackPressed(device))
                 {
@@ -1614,8 +1713,22 @@ namespace VRCombat.Core
 
             try
             {
+                // Standard menu buttons
                 if (OVRInput.Get(OVRInput.Button.Start)
                     || OVRInput.Get(OVRInput.RawButton.Start))
+                    return true;
+
+                // Quest 3 left controller hamburger/menu button (Button.Three on left hand)
+                if (OVRInput.Get(OVRInput.Button.Three, OVRInput.Controller.LTouch)
+                    || OVRInput.Get(OVRInput.RawButton.Y))
+                    return true;
+
+                // Also check for Menu button explicitly
+                if (OVRInput.Get(OVRInput.Button.Two, OVRInput.Controller.LTouch))
+                    return true;
+
+                if (OVRInput.Get(OVRInput.Button.PrimaryThumbstick)
+                    || OVRInput.Get(OVRInput.RawButton.LThumbstick))
                 {
                     return true;
                 }
@@ -1640,13 +1753,13 @@ namespace VRCombat.Core
             return false;
         }
 
-        static bool IsAnyPauseFallbackFaceButtonPressed(InputDeviceCharacteristics desiredCharacteristics)
+        static bool IsAnyPauseFallbackThumbstickPressed(InputDeviceCharacteristics desiredCharacteristics)
         {
             s_ControllerDeviceBuffer.Clear();
             InputDevices.GetDevicesWithCharacteristics(desiredCharacteristics, s_ControllerDeviceBuffer);
             for (var i = 0; i < s_ControllerDeviceBuffer.Count; i++)
             {
-                if (IsPauseFallbackFaceButtonPressed(s_ControllerDeviceBuffer[i]))
+                if (IsPauseFallbackThumbstickPressed(s_ControllerDeviceBuffer[i]))
                     return true;
             }
 
@@ -1816,18 +1929,31 @@ namespace VRCombat.Core
             if (device.TryGetFeatureValue(new InputFeatureUsage<bool>("start"), out var startPressed) && startPressed)
                 return true;
 
+            // Quest 3 Touch Plus specific - hamburger/menu button mappings
+            if (device.TryGetFeatureValue(new InputFeatureUsage<bool>("menuButton"), out var menuButtonPressed) && menuButtonPressed)
+                return true;
+
+            if (device.TryGetFeatureValue(new InputFeatureUsage<bool>("systemButton"), out var systemButtonPressed) && systemButtonPressed)
+                return true;
+
             return false;
         }
 
-        static bool IsPauseFallbackFaceButtonPressed(XRInputDevice device)
+        static bool IsPauseFallbackThumbstickPressed(XRInputDevice device)
         {
-            if (!device.isValid || HasMenuSpecificButtonUsage(device))
+            if (!device.isValid)
                 return false;
 
-            if (device.TryGetFeatureValue(XRCommonUsages.secondaryButton, out var secondaryPressed) && secondaryPressed)
+            if (device.TryGetFeatureValue(XRCommonUsages.primary2DAxisClick, out var thumbstickPressed) && thumbstickPressed)
                 return true;
 
-            if (device.TryGetFeatureValue(XRCommonUsages.primaryButton, out var primaryPressed) && primaryPressed)
+            if (device.TryGetFeatureValue(new InputFeatureUsage<bool>("primary2DAxisClick"), out var thumbstickPressedByName) && thumbstickPressedByName)
+                return true;
+
+            if (device.TryGetFeatureValue(new InputFeatureUsage<bool>("thumbstickClicked"), out var thumbstickClicked) && thumbstickClicked)
+                return true;
+
+            if (device.TryGetFeatureValue(new InputFeatureUsage<bool>("joystickClicked"), out var joystickClicked) && joystickClicked)
                 return true;
 
             return false;
@@ -2231,6 +2357,8 @@ namespace VRCombat.Core
                 return;
 
             m_ArenaSurfaceColliders.Clear();
+
+            // First, collect colliders from MeshFilters with renderers (original behavior)
             var meshFilters = arenaRoot.GetComponentsInChildren<MeshFilter>(true);
             for (var i = 0; i < meshFilters.Length; i++)
             {
@@ -2250,7 +2378,25 @@ namespace VRCombat.Core
                 meshCollider.convex = false;
                 meshCollider.isTrigger = false;
                 meshCollider.enabled = true;
-                m_ArenaSurfaceColliders.Add(meshCollider);
+                if (!m_ArenaSurfaceColliders.Contains(meshCollider))
+                    m_ArenaSurfaceColliders.Add(meshCollider);
+            }
+
+            // Also collect any existing enabled non-trigger colliders under the arena
+            // This ensures floor colliders without renderers are also included
+            var existingColliders = arenaRoot.GetComponentsInChildren<Collider>(true);
+            for (var i = 0; i < existingColliders.Length; i++)
+            {
+                var collider = existingColliders[i];
+                if (collider == null || !collider.enabled || collider.isTrigger)
+                    continue;
+
+                // Skip colliders already added
+                if (m_ArenaSurfaceColliders.Contains(collider))
+                    continue;
+
+                // Include BoxColliders, MeshColliders, and other non-trigger colliders as potential floor surfaces
+                m_ArenaSurfaceColliders.Add(collider);
             }
 
             TryConfigureKillZoneFromArena(arenaRoot);
@@ -3512,21 +3658,29 @@ namespace VRCombat.Core
 
         void AddPickupSelectListeners(XRGrabInteractable grabInteractable, RuntimeMountedPickup mountedPickup)
         {
-            if (grabInteractable == null || mountedPickup == null)
+            if (grabInteractable == null)
+                return;
+
+            m_CombatPickupListenerRegistrations.RemoveWhere(candidate => candidate == null);
+            if (!m_CombatPickupListenerRegistrations.Add(grabInteractable))
                 return;
 
             grabInteractable.selectEntered.AddListener(args =>
             {
-                mountedPickup.SetState(RuntimeMountedPickupState.Held);
+                if (mountedPickup != null)
+                    mountedPickup.SetState(RuntimeMountedPickupState.Held);
                 var side = HandleHandReplacementEquipped(grabInteractable, args);
+                SetHandSideVisualSuppressed(side, true);
                 SetHandSideCollidersSuppressed(side, true);
             });
 
             grabInteractable.selectExited.AddListener(args =>
             {
                 var side = HandleHandReplacementReleased(grabInteractable, args);
+                SetHandSideVisualSuppressed(side, false);
                 SetHandSideCollidersSuppressed(side, false);
-                mountedPickup.SetState(RuntimeMountedPickupState.Dropped);
+                if (mountedPickup != null)
+                    mountedPickup.SetState(RuntimeMountedPickupState.Dropped);
             });
         }
 
@@ -3619,6 +3773,36 @@ namespace VRCombat.Core
             return false;
         }
 
+        bool IsCombatPickupInteractable(XRGrabInteractable grabInteractable)
+        {
+            if (grabInteractable == null)
+                return false;
+
+            if (grabInteractable.GetComponentInParent<CapsuleEnemy>() != null)
+                return false;
+
+            if (grabInteractable.GetComponentInParent<FlintlockWeapon>() != null)
+                return true;
+
+            if (grabInteractable.GetComponentInParent<SceneAuthoredPickup>() != null)
+                return true;
+
+            if (grabInteractable.GetComponentInParent<RuntimeMountedPickup>() != null)
+                return true;
+
+            if (grabInteractable.GetComponentInParent<RiggedChainWeapon>() != null)
+                return true;
+
+            if (grabInteractable.GetComponentInChildren<SwingDamageDealer>(true) != null)
+                return true;
+
+            var lowerName = grabInteractable.name.ToLowerInvariant();
+            return lowerName.Contains("sword")
+                || lowerName.Contains("shield")
+                || lowerName.Contains("flintlock")
+                || lowerName.Contains("chain");
+        }
+
         void SetHandSideVisualSuppressed(HandSide side, bool suppress)
         {
             if (side == HandSide.None)
@@ -3631,9 +3815,7 @@ namespace VRCombat.Core
                 return;
             }
 
-            if (suppressedList.Count > 0)
-                return;
-
+            // Don't early return if list is non-empty - try to collect more in case transforms weren't ready before
             Transform primary;
             Transform secondary;
             if (side == HandSide.Left)
@@ -3647,9 +3829,45 @@ namespace VRCombat.Core
                 secondary = m_RightControllerTransform;
             }
 
+            // Try to refresh hand transforms if they're null
+            if (primary == null && secondary == null)
+            {
+                RefreshHandTransformsIfNeeded();
+                if (side == HandSide.Left)
+                {
+                    primary = m_LeftHandTransform;
+                    secondary = m_LeftControllerTransform;
+                }
+                else
+                {
+                    primary = m_RightHandTransform;
+                    secondary = m_RightControllerTransform;
+                }
+            }
+
             CollectSuppressedHandRenderers(primary, suppressedList);
             if (!ReferenceEquals(primary, secondary))
                 CollectSuppressedHandRenderers(secondary, suppressedList);
+        }
+
+        void RefreshHandTransformsIfNeeded()
+        {
+            if (m_PlayerRoot == null)
+                return;
+
+            if (m_LeftHandTransform == null || m_RightHandTransform == null)
+            {
+                ResolveModalityManagedRigTransforms(
+                    out var leftHand,
+                    out var rightHand,
+                    out var leftController,
+                    out var rightController);
+
+                m_LeftHandTransform ??= leftHand ?? FindHandTransform("left");
+                m_RightHandTransform ??= rightHand ?? FindHandTransform("right");
+                m_LeftControllerTransform ??= leftController ?? FindControllerTransform("left") ?? m_LeftHandTransform;
+                m_RightControllerTransform ??= rightController ?? FindControllerTransform("right") ?? m_RightHandTransform;
+            }
         }
 
         void SetHandSideCollidersSuppressed(HandSide side, bool suppress)
@@ -3664,9 +3882,7 @@ namespace VRCombat.Core
                 return;
             }
 
-            if (suppressedList.Count > 0)
-                return;
-
+            // Don't early return if list is non-empty - try to collect more in case transforms weren't ready before
             Transform primary;
             Transform secondary;
             if (side == HandSide.Left)
@@ -3678,6 +3894,22 @@ namespace VRCombat.Core
             {
                 primary = m_RightHandTransform;
                 secondary = m_RightControllerTransform;
+            }
+
+            // Try to refresh hand transforms if they're null
+            if (primary == null && secondary == null)
+            {
+                RefreshHandTransformsIfNeeded();
+                if (side == HandSide.Left)
+                {
+                    primary = m_LeftHandTransform;
+                    secondary = m_LeftControllerTransform;
+                }
+                else
+                {
+                    primary = m_RightHandTransform;
+                    secondary = m_RightControllerTransform;
+                }
             }
 
             CollectSuppressedHandColliders(primary, suppressedList);
@@ -4784,7 +5016,16 @@ namespace VRCombat.Core
         {
             var grabInteractables = FindObjectsByType<XRGrabInteractable>(FindObjectsInactive.Include, FindObjectsSortMode.None);
             for (var i = 0; i < grabInteractables.Length; i++)
-                EnsureMaxPhysicalGrabDistanceFilter(grabInteractables[i]);
+            {
+                var grabInteractable = grabInteractables[i];
+                EnsureMaxPhysicalGrabDistanceFilter(grabInteractable);
+                if (!IsCombatPickupInteractable(grabInteractable))
+                    continue;
+
+                AddPickupSelectListeners(
+                    grabInteractable,
+                    grabInteractable.GetComponent<RuntimeMountedPickup>() ?? grabInteractable.GetComponentInParent<RuntimeMountedPickup>());
+            }
         }
 
         void EnsureSceneAuthoredResettables()

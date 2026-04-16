@@ -1,8 +1,12 @@
+using System;
 using UnityEngine;
+using UnityEngine.InputSystem;
 using UnityEngine.XR;
 using UnityEngine.XR.Interaction.Toolkit;
 using UnityEngine.XR.Interaction.Toolkit.Interactables;
 using UnityEngine.XR.Interaction.Toolkit.Interactors;
+using XRCommonUsages = UnityEngine.XR.CommonUsages;
+using XRInputDevice = UnityEngine.XR.InputDevice;
 
 namespace VRCombat.Combat
 {
@@ -16,9 +20,18 @@ namespace VRCombat.Combat
         const float MaximumReliableFireThreshold = 0.55f;
         const float TriggerReleaseThreshold = 0.2f;
         const float ReloadReleaseThreshold = 0.25f;
+        const float DefaultReloadDuration = 0.8f;
         const float DefaultProjectileSpeed = 30f;
         const float DefaultProjectileLifetime = 6f;
         const float DefaultProjectileRadius = 0.018f;
+        const float AttachedBulletFallbackSeatDistance = 0.035f;
+        const float AttachedBulletFallbackDistanceThreshold = 0.08f;
+        const float FireSfxMinPitch = 0.96f;
+        const float FireSfxMaxPitch = 1.04f;
+        const float HitscanRadius = 0.028f;
+        const string FireSfxResourcePath = "SFX/flintlockfire";
+        const string ReloadSfxResourcePath = "SFX/flintlockreload";
+        const float MaxSfxPlayDuration = 1f;
 
         [Header("Weapon Settings")]
         public float damageAmount = 50f;
@@ -55,10 +68,20 @@ namespace VRCombat.Combat
         [SerializeField]
         float m_ProjectileLifetime = DefaultProjectileLifetime;
 
+        [SerializeField]
+        float m_ReloadDuration = DefaultReloadDuration;
+
+        [SerializeField]
+        AudioClip m_FireSfxClip;
+
+        [SerializeField]
+        AudioClip m_ReloadSfxClip;
+
         XRGrabInteractable m_Interactable;
-        InputDevice m_HeldDevice;
+        XRInputDevice m_HeldDevice;
         XRNode m_HeldHandNode = XRNode.LeftHand;
         IXRSelectInteractor m_HoldingInteractor;
+        AudioSource m_FireAudioSource;
         Transform m_TriggerAnimationTransform;
         Transform m_AttachedBulletParent;
         Vector3 m_AttachedBulletLocalPosition;
@@ -67,18 +90,44 @@ namespace VRCombat.Combat
         GameObject m_AttachedBulletTemplate;
         bool m_HasHeldHandNode;
         bool m_IsLoaded = true;
+        bool m_IsReloading;
         bool m_WasHeldTriggerPressed;
         bool m_WasHeldReloadPressed;
+        float m_ReloadCompleteTime = -1f;
+        static readonly RaycastHit[] s_ShotHitBuffer = new RaycastHit[16];
 
         void Awake()
         {
             m_Interactable = GetComponent<XRGrabInteractable>();
             ConfigureGrabInteractable();
             EnsureGripAttachTransform();
+            EnsureFireAudioSource();
             CacheAttachedBulletPose();
             EnsureAttachedBulletTemplate();
             ConfigureTriggerAnimation();
             ResetWeaponState();
+        }
+
+        void EnsureFireAudioSource()
+        {
+            if (m_FireAudioSource == null)
+                m_FireAudioSource = GetComponent<AudioSource>();
+
+            if (m_FireAudioSource == null)
+                m_FireAudioSource = gameObject.AddComponent<AudioSource>();
+
+            m_FireAudioSource.playOnAwake = false;
+            m_FireAudioSource.loop = false;
+            m_FireAudioSource.spatialBlend = 1f;
+            m_FireAudioSource.rolloffMode = AudioRolloffMode.Linear;
+            m_FireAudioSource.minDistance = 1f;
+            m_FireAudioSource.maxDistance = 16f;
+
+            if (m_FireSfxClip == null)
+                m_FireSfxClip = Resources.Load<AudioClip>(FireSfxResourcePath);
+
+            if (m_ReloadSfxClip == null)
+                m_ReloadSfxClip = Resources.Load<AudioClip>(ReloadSfxResourcePath);
         }
 
         void OnEnable()
@@ -104,6 +153,8 @@ namespace VRCombat.Combat
 
         void Update()
         {
+            UpdateReloadState();
+
             if (m_Interactable == null || !m_Interactable.isSelected)
             {
                 ClearHeldState();
@@ -288,10 +339,15 @@ namespace VRCombat.Combat
                 return;
             }
 
-            if (!m_HasHeldHandNode && !TryResolveHeldHandNode(m_HoldingInteractor, out m_HeldHandNode))
-                return;
+            // Keep trying to resolve hand node each frame until successful
+            if (!m_HasHeldHandNode)
+            {
+                if (!TryResolveHeldHandNode(m_HoldingInteractor, out m_HeldHandNode))
+                    return;
+                m_HasHeldHandNode = true;
+                m_HeldDevice = default; // Reset device when hand node changes
+            }
 
-            m_HasHeldHandNode = true;
             if (!m_HeldDevice.isValid)
                 m_HeldDevice = InputDevices.GetDeviceAtXRNode(m_HeldHandNode);
         }
@@ -300,19 +356,24 @@ namespace VRCombat.Combat
         {
             if (m_HoldingInteractor is XRBaseInputInteractor inputInteractor)
             {
-                if (inputInteractor.activateInput.TryReadValue(out var activateValue))
+                var activateValue = inputInteractor.activateInput.ReadValue();
+                if (activateValue > 0f)
                     return activateValue;
 
                 if (inputInteractor.activateInput.ReadIsPerformed())
                     return 1f;
             }
 
+            var inputSystemTriggerValue = ReadHeldInputSystemTriggerValue();
+            if (inputSystemTriggerValue > 0f)
+                return inputSystemTriggerValue;
+
             if (TryGetHeldDevice(out var heldDevice))
             {
-                if (heldDevice.TryGetFeatureValue(CommonUsages.trigger, out var triggerValue))
+                if (heldDevice.TryGetFeatureValue(XRCommonUsages.trigger, out var triggerValue))
                     return triggerValue;
 
-                if (heldDevice.TryGetFeatureValue(CommonUsages.triggerButton, out var triggerButtonState))
+                if (heldDevice.TryGetFeatureValue(XRCommonUsages.triggerButton, out var triggerButtonState))
                     return triggerButtonState ? 1f : 0f;
             }
 
@@ -321,12 +382,15 @@ namespace VRCombat.Combat
 
         bool ReadHeldReloadPressed()
         {
+            if (IsHeldInputSystemButtonPressed("primaryButton", "secondaryButton"))
+                return true;
+
             return TryGetHeldDevice(out var heldDevice)
-                && heldDevice.TryGetFeatureValue(CommonUsages.primaryButton, out var reloadPressed)
-                && reloadPressed;
+                && ((heldDevice.TryGetFeatureValue(XRCommonUsages.primaryButton, out var primaryReloadPressed) && primaryReloadPressed)
+                    || (heldDevice.TryGetFeatureValue(XRCommonUsages.secondaryButton, out var secondaryReloadPressed) && secondaryReloadPressed));
         }
 
-        bool TryGetHeldDevice(out InputDevice heldDevice)
+        bool TryGetHeldDevice(out XRInputDevice heldDevice)
         {
             heldDevice = m_HeldDevice;
             if (heldDevice.isValid)
@@ -341,6 +405,151 @@ namespace VRCombat.Combat
 
             m_HeldDevice = heldDevice;
             return true;
+        }
+
+        float ReadHeldInputSystemTriggerValue()
+        {
+            if (!m_HasHeldHandNode)
+                return 0f;
+
+            var bestTriggerValue = 0f;
+            var handController = GetHeldInputSystemController();
+            if (TryGetInputSystemAxisValue(handController, "trigger", out var triggerValue))
+                bestTriggerValue = Mathf.Max(bestTriggerValue, triggerValue);
+
+            if (TryGetInputSystemAxisValue(handController, "triggerPressed", out triggerValue))
+                bestTriggerValue = Mathf.Max(bestTriggerValue, triggerValue);
+
+            if (TryGetInputSystemAxisValue(handController, "triggerButton", out triggerValue))
+                bestTriggerValue = Mathf.Max(bestTriggerValue, triggerValue);
+
+            if (TryGetInputSystemAxisValue(handController, "indexButton", out triggerValue))
+                bestTriggerValue = Mathf.Max(bestTriggerValue, triggerValue);
+
+            if (bestTriggerValue > 0f)
+                return bestTriggerValue;
+
+            var inputSystemDevices = UnityEngine.InputSystem.InputSystem.devices;
+            for (var i = 0; i < inputSystemDevices.Count; i++)
+            {
+                var device = inputSystemDevices[i];
+                if (!MatchesHandNode(device, m_HeldHandNode))
+                    continue;
+
+                if (TryGetInputSystemAxisValue(device, "trigger", out triggerValue))
+                    bestTriggerValue = Mathf.Max(bestTriggerValue, triggerValue);
+
+                if (TryGetInputSystemAxisValue(device, "triggerPressed", out triggerValue))
+                    bestTriggerValue = Mathf.Max(bestTriggerValue, triggerValue);
+
+                if (TryGetInputSystemAxisValue(device, "triggerButton", out triggerValue))
+                    bestTriggerValue = Mathf.Max(bestTriggerValue, triggerValue);
+
+                if (TryGetInputSystemAxisValue(device, "indexButton", out triggerValue))
+                    bestTriggerValue = Mathf.Max(bestTriggerValue, triggerValue);
+
+                if (bestTriggerValue > 0f)
+                    return bestTriggerValue;
+            }
+
+            return bestTriggerValue;
+        }
+
+        bool IsHeldInputSystemButtonPressed(params string[] controlPaths)
+        {
+            if (!m_HasHeldHandNode || controlPaths == null || controlPaths.Length == 0)
+                return false;
+
+            var handController = GetHeldInputSystemController();
+            for (var controlIndex = 0; controlIndex < controlPaths.Length; controlIndex++)
+            {
+                if (IsInputSystemButtonPressed(handController, controlPaths[controlIndex]))
+                    return true;
+            }
+
+            var inputSystemDevices = UnityEngine.InputSystem.InputSystem.devices;
+            for (var i = 0; i < inputSystemDevices.Count; i++)
+            {
+                var device = inputSystemDevices[i];
+                if (!MatchesHandNode(device, m_HeldHandNode))
+                    continue;
+
+                for (var controlIndex = 0; controlIndex < controlPaths.Length; controlIndex++)
+                {
+                    if (IsInputSystemButtonPressed(device, controlPaths[controlIndex]))
+                        return true;
+                }
+            }
+
+            return false;
+        }
+
+        UnityEngine.InputSystem.XR.XRController GetHeldInputSystemController()
+        {
+            return m_HeldHandNode == XRNode.RightHand
+                ? UnityEngine.InputSystem.XR.XRController.rightHand
+                : UnityEngine.InputSystem.XR.XRController.leftHand;
+        }
+
+        static bool TryGetInputSystemAxisValue(UnityEngine.InputSystem.InputDevice device, string controlPath, out float value)
+        {
+            value = 0f;
+            if (device == null || !device.added || string.IsNullOrWhiteSpace(controlPath))
+                return false;
+
+            var axisControl = device.TryGetChildControl<UnityEngine.InputSystem.Controls.AxisControl>(controlPath);
+            if (axisControl != null)
+            {
+                value = axisControl.ReadValue();
+                return true;
+            }
+
+            var buttonControl = device.TryGetChildControl<UnityEngine.InputSystem.Controls.ButtonControl>(controlPath);
+            if (buttonControl != null)
+            {
+                value = buttonControl.ReadValue();
+                return true;
+            }
+
+            return false;
+        }
+
+        static bool IsInputSystemButtonPressed(UnityEngine.InputSystem.InputDevice device, string controlPath)
+        {
+            if (device == null || !device.added || string.IsNullOrWhiteSpace(controlPath))
+                return false;
+
+            var buttonControl = device.TryGetChildControl<UnityEngine.InputSystem.Controls.ButtonControl>(controlPath);
+            return buttonControl != null && buttonControl.isPressed;
+        }
+
+        static bool MatchesHandNode(UnityEngine.InputSystem.InputDevice device, XRNode handNode)
+        {
+            if (device == null)
+                return false;
+
+            var desiredUsage = handNode == XRNode.RightHand ? "RightHand" : "LeftHand";
+            if (HasInputSystemUsage(device, desiredUsage))
+                return true;
+
+            var descriptor = $"{device.displayName} {device.name} {device.layout}";
+            var handednessToken = handNode == XRNode.RightHand ? "right" : "left";
+            return descriptor.IndexOf(handednessToken, StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        static bool HasInputSystemUsage(UnityEngine.InputSystem.InputDevice device, string usageName)
+        {
+            if (device == null || string.IsNullOrWhiteSpace(usageName))
+                return false;
+
+            var usages = device.usages;
+            for (var i = 0; i < usages.Count; i++)
+            {
+                if (string.Equals(usages[i].ToString(), usageName, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+
+            return false;
         }
 
         bool TryResolveHeldHandNode(IXRInteractor interactor, out XRNode handNode)
@@ -365,23 +574,47 @@ namespace VRCombat.Combat
                     return true;
                 }
 
-                if (TryGetNodeDistanceSquared(XRNode.LeftHand, interactorTransform.position, out var leftDistanceSqr) &&
-                    TryGetNodeDistanceSquared(XRNode.RightHand, interactorTransform.position, out var rightDistanceSqr))
+                // Try distance-based detection with both hands
+                var hasLeftDistance = TryGetNodeDistanceSquared(XRNode.LeftHand, interactorTransform.position, out var leftDistanceSqr);
+                var hasRightDistance = TryGetNodeDistanceSquared(XRNode.RightHand, interactorTransform.position, out var rightDistanceSqr);
+
+                if (hasLeftDistance && hasRightDistance)
                 {
                     handNode = leftDistanceSqr <= rightDistanceSqr ? XRNode.LeftHand : XRNode.RightHand;
                     return true;
                 }
 
-                if (TryGetNodeDistanceSquared(XRNode.LeftHand, interactorTransform.position, out _))
+                // Only one hand device is available - use it
+                if (hasLeftDistance)
                 {
                     handNode = XRNode.LeftHand;
                     return true;
                 }
 
-                if (TryGetNodeDistanceSquared(XRNode.RightHand, interactorTransform.position, out _))
+                if (hasRightDistance)
                 {
                     handNode = XRNode.RightHand;
                     return true;
+                }
+            }
+
+            // Last resort: check if interactor has handedness info via its hierarchy name
+            if (interactor is Component interactorComponent)
+            {
+                var root = interactorComponent.transform.root;
+                if (root != null)
+                {
+                    var rootName = root.name.ToLowerInvariant();
+                    if (rootName.Contains("left"))
+                    {
+                        handNode = XRNode.LeftHand;
+                        return true;
+                    }
+                    if (rootName.Contains("right"))
+                    {
+                        handNode = XRNode.RightHand;
+                        return true;
+                    }
                 }
             }
 
@@ -410,7 +643,7 @@ namespace VRCombat.Combat
             if (!device.isValid)
                 return false;
 
-            if (!device.TryGetFeatureValue(CommonUsages.devicePosition, out var devicePosition))
+            if (!device.TryGetFeatureValue(XRCommonUsages.devicePosition, out var devicePosition))
                 return false;
 
             distanceSqr = (devicePosition - targetPosition).sqrMagnitude;
@@ -433,11 +666,21 @@ namespace VRCombat.Combat
 
         void Fire()
         {
-            if (!m_IsLoaded || !TryCreateProjectileInstance(out var projectileObject))
+            if (!m_IsLoaded || m_IsReloading || !TryCreateProjectileInstance(out var projectileObject))
                 return;
 
             var origin = GetFireOrigin();
             var direction = GetFireDirection();
+            var speed = Mathf.Max(1f, m_ProjectileSpeed);
+            var maxDistance = Mathf.Max(0.25f, range);
+            var visualTravelDistance = maxDistance;
+            var ignoredColliders = CollectIgnoredProjectileColliders();
+            if (TryResolveShotImpact(origin, direction, maxDistance, ignoredColliders, out var impact))
+            {
+                ApplyResolvedShotImpact(impact, direction);
+                visualTravelDistance = Mathf.Max(0.02f, impact.distance);
+            }
+
             projectileObject.transform.SetPositionAndRotation(origin, Quaternion.LookRotation(direction, Vector3.up));
             projectileObject.SetActive(true);
 
@@ -446,41 +689,229 @@ namespace VRCombat.Combat
                 projectile = projectileObject.AddComponent<FlintlockProjectile>();
 
             projectile.Initialize(
-                damageAmount,
-                knockbackAmount,
-                Mathf.Max(1f, m_ProjectileSpeed),
+                speed,
+                visualTravelDistance,
                 Mathf.Max(0.5f, m_ProjectileLifetime),
-                Mathf.Max(0.005f, DefaultProjectileRadius),
-                gameObject,
-                CollectIgnoredProjectileColliders());
+                Mathf.Max(0.005f, DefaultProjectileRadius));
 
             m_IsLoaded = false;
             SetLoadedVisualState();
 
             if (muzzleFlash != null)
                 muzzleFlash.Play();
+
+            PlayFireSfx();
         }
 
         Vector3 GetFireOrigin()
         {
-            if (raycastOrigin != null)
-                return raycastOrigin.position;
-
-            if (attachedBullet != null)
-                return attachedBullet.transform.position;
-
-            return transform.position + GetFireDirection() * 0.12f;
+            var fireAnchor = GetFireAnchor();
+            return fireAnchor != null
+                ? fireAnchor.position
+                : transform.position + GetFireDirection() * 0.12f;
         }
 
         Vector3 GetFireDirection()
         {
-            if (raycastOrigin != null && raycastOrigin.forward.sqrMagnitude > MinimumDirectionMagnitude)
-                return raycastOrigin.forward.normalized;
+            if (TryGetBarrelDirection(out var barrelDirection))
+                return barrelDirection;
+
+            var fireAnchor = GetFireAnchor();
+            if (fireAnchor != null && fireAnchor.forward.sqrMagnitude > MinimumDirectionMagnitude)
+                return fireAnchor.forward.normalized;
 
             if (transform.forward.sqrMagnitude > MinimumDirectionMagnitude)
                 return transform.forward.normalized;
 
             return Vector3.forward;
+        }
+
+        Transform GetFireAnchor()
+        {
+            if (raycastOrigin != null)
+                return raycastOrigin;
+
+            if (attachedBullet != null)
+                return attachedBullet.transform;
+
+            return transform;
+        }
+
+        bool TryGetBarrelDirection(out Vector3 direction)
+        {
+            direction = Vector3.zero;
+            if (raycastOrigin == null || attachedBullet == null)
+                return false;
+
+            var muzzleVector = raycastOrigin.position - attachedBullet.transform.position;
+            if (muzzleVector.sqrMagnitude <= MinimumDirectionMagnitude)
+                return false;
+
+            var referenceDirection = raycastOrigin.forward.sqrMagnitude > MinimumDirectionMagnitude
+                ? raycastOrigin.forward.normalized
+                : transform.forward.normalized;
+            var normalizedVector = muzzleVector.normalized;
+            var alignment = Vector3.Dot(referenceDirection, normalizedVector);
+            if (Mathf.Abs(alignment) < 0.5f)
+                return false;
+
+            direction = alignment >= 0f ? normalizedVector : -normalizedVector;
+            return true;
+        }
+
+        bool TryResolveShotImpact(
+            Vector3 origin,
+            Vector3 direction,
+            float maxDistance,
+            Collider[] ignoredColliders,
+            out RaycastHit resolvedHit)
+        {
+            resolvedHit = default;
+            var hitCount = Physics.SphereCastNonAlloc(
+                origin,
+                HitscanRadius,
+                direction,
+                s_ShotHitBuffer,
+                maxDistance,
+                ~0,
+                QueryTriggerInteraction.Ignore);
+            if (hitCount <= 0)
+                return false;
+
+            var foundHit = false;
+            var bestDistance = float.PositiveInfinity;
+            for (var i = 0; i < hitCount; i++)
+            {
+                var candidate = s_ShotHitBuffer[i];
+                if (candidate.collider == null || ShouldIgnoreShotCollider(candidate.collider, ignoredColliders))
+                    continue;
+
+                if (candidate.distance >= bestDistance)
+                    continue;
+
+                bestDistance = candidate.distance;
+                resolvedHit = candidate;
+                foundHit = true;
+            }
+
+            return foundHit;
+        }
+
+        static bool ShouldIgnoreShotCollider(Collider candidate, Collider[] ignoredColliders)
+        {
+            if (candidate == null)
+                return true;
+
+            if (ignoredColliders == null)
+                return false;
+
+            for (var i = 0; i < ignoredColliders.Length; i++)
+            {
+                var ignoredCollider = ignoredColliders[i];
+                if (ignoredCollider == null)
+                    continue;
+
+                if (candidate == ignoredCollider)
+                    return true;
+            }
+
+            return false;
+        }
+
+        void ApplyResolvedShotImpact(RaycastHit impact, Vector3 direction)
+        {
+            if (impact.collider == null)
+                return;
+
+            if (TryResolveDamageable(impact.collider, out var damageable))
+                damageable.ApplyDamage(damageAmount, impact.point, gameObject);
+
+            var impactRigidbody = impact.rigidbody != null ? impact.rigidbody : impact.collider.attachedRigidbody;
+            if (impactRigidbody != null && knockbackAmount > 0f)
+                impactRigidbody.AddForceAtPosition(direction * knockbackAmount, impact.point, ForceMode.Impulse);
+        }
+
+        void PlayFireSfx()
+        {
+            if (m_FireAudioSource == null || m_FireSfxClip == null)
+                return;
+
+            m_FireAudioSource.pitch = UnityEngine.Random.Range(FireSfxMinPitch, FireSfxMaxPitch);
+            PlayClipLimited(m_FireSfxClip);
+        }
+
+        void PlayReloadSfx()
+        {
+            if (m_FireAudioSource == null || m_ReloadSfxClip == null)
+                return;
+
+            m_FireAudioSource.pitch = UnityEngine.Random.Range(FireSfxMinPitch, FireSfxMaxPitch);
+            PlayClipLimited(m_ReloadSfxClip);
+        }
+
+        void PlayClipLimited(AudioClip clip)
+        {
+            if (m_FireAudioSource == null || clip == null)
+                return;
+
+            // Use PlayOneShot to allow overlapping sounds
+            // Create a temporary AudioSource for time-limited playback
+            var tempSource = gameObject.AddComponent<AudioSource>();
+            tempSource.spatialBlend = m_FireAudioSource.spatialBlend;
+            tempSource.rolloffMode = m_FireAudioSource.rolloffMode;
+            tempSource.minDistance = m_FireAudioSource.minDistance;
+            tempSource.maxDistance = m_FireAudioSource.maxDistance;
+            tempSource.pitch = m_FireAudioSource.pitch;
+            tempSource.playOnAwake = false;
+            tempSource.clip = clip;
+            tempSource.Play();
+
+            var duration = Mathf.Min(clip.length, MaxSfxPlayDuration);
+            StartCoroutine(StopAndDestroyAudioAfterDelay(tempSource, duration));
+        }
+
+        System.Collections.IEnumerator StopAndDestroyAudioAfterDelay(AudioSource source, float delay)
+        {
+            yield return new WaitForSeconds(delay);
+            if (source != null)
+            {
+                source.Stop();
+                Destroy(source);
+            }
+        }
+
+        static bool TryResolveDamageable(Collider hitCollider, out IDamageable damageable)
+        {
+            damageable = null;
+            if (hitCollider == null)
+                return false;
+
+            if (TryResolveDamageable(hitCollider.transform, out damageable))
+                return true;
+
+            return hitCollider.attachedRigidbody != null
+                && TryResolveDamageable(hitCollider.attachedRigidbody.transform, out damageable);
+        }
+
+        static bool TryResolveDamageable(Transform current, out IDamageable damageable)
+        {
+            damageable = null;
+            while (current != null)
+            {
+                var behaviours = current.GetComponents<MonoBehaviour>();
+                for (var i = 0; i < behaviours.Length; i++)
+                {
+                    if (behaviours[i] is IDamageable resolvedDamageable)
+                    {
+                        damageable = resolvedDamageable;
+                        return true;
+                    }
+                }
+
+                current = current.parent;
+            }
+
+            return false;
         }
 
         bool TryCreateProjectileInstance(out GameObject projectileObject)
@@ -547,9 +978,34 @@ namespace VRCombat.Combat
             var parent = m_AttachedBulletParent != null ? m_AttachedBulletParent : transform;
             var bulletTransform = attachedBullet.transform;
             bulletTransform.SetParent(parent, false);
-            bulletTransform.localPosition = m_AttachedBulletLocalPosition;
+            bulletTransform.localPosition = TryGetFallbackAttachedBulletLocalPosition(parent, out var fallbackLocalPosition)
+                ? fallbackLocalPosition
+                : m_AttachedBulletLocalPosition;
             bulletTransform.localRotation = m_AttachedBulletLocalRotation;
             bulletTransform.localScale = m_AttachedBulletLocalScale;
+        }
+
+        bool TryGetFallbackAttachedBulletLocalPosition(Transform parent, out Vector3 localPosition)
+        {
+            localPosition = Vector3.zero;
+            if (parent == null || raycastOrigin == null)
+            {
+                return false;
+            }
+
+            var fallbackDirection = raycastOrigin.forward.sqrMagnitude > MinimumDirectionMagnitude
+                ? raycastOrigin.forward.normalized
+                : transform.forward.normalized;
+            if (fallbackDirection.sqrMagnitude <= MinimumDirectionMagnitude)
+                return false;
+
+            var worldSeatPosition = raycastOrigin.position - fallbackDirection * AttachedBulletFallbackSeatDistance;
+            var authoredWorldPosition = parent.TransformPoint(m_AttachedBulletLocalPosition);
+            if ((authoredWorldPosition - worldSeatPosition).sqrMagnitude < AttachedBulletFallbackDistanceThreshold * AttachedBulletFallbackDistanceThreshold)
+                return false;
+
+            localPosition = parent.InverseTransformPoint(worldSeatPosition);
+            return true;
         }
 
         Collider[] CollectIgnoredProjectileColliders()
@@ -574,22 +1030,37 @@ namespace VRCombat.Combat
         void SetLoadedVisualState()
         {
             if (attachedBullet != null)
-                attachedBullet.SetActive(m_IsLoaded);
+                attachedBullet.SetActive(m_IsLoaded && !m_IsReloading);
         }
 
         public void Reload()
         {
-            if (m_IsLoaded)
+            if (m_IsLoaded || m_IsReloading)
                 return;
 
+            SetLoadedVisualState();
+            m_IsReloading = true;
+            m_ReloadCompleteTime = Time.time + Mathf.Max(0.05f, m_ReloadDuration);
+        }
+
+        void UpdateReloadState()
+        {
+            if (!m_IsReloading || Time.time < m_ReloadCompleteTime)
+                return;
+
+            m_IsReloading = false;
+            m_ReloadCompleteTime = -1f;
             m_IsLoaded = true;
             RestoreAttachedBulletVisual();
             SetLoadedVisualState();
+            PlayReloadSfx();
         }
 
         public void ResetWeaponState()
         {
             ClearHeldState();
+            m_IsReloading = false;
+            m_ReloadCompleteTime = -1f;
             m_IsLoaded = true;
             RestoreAttachedBulletVisual();
             SetLoadedVisualState();
@@ -600,112 +1071,68 @@ namespace VRCombat.Combat
     public class FlintlockProjectile : MonoBehaviour
     {
         Rigidbody m_Rigidbody;
-        GameObject m_Source;
-        float m_DamageAmount;
-        float m_KnockbackAmount;
+        float m_MaxTravelDistance;
+        float m_TravelDistance;
         float m_LifetimeRemaining;
-        bool m_HasImpacted;
+        float m_Speed;
+        Vector3 m_PreviousPosition;
 
         public void Initialize(
-            float damageAmount,
-            float knockbackAmount,
             float speed,
+            float maxTravelDistance,
             float lifetimeSeconds,
-            float fallbackRadius,
-            GameObject source,
-            Collider[] ignoredColliders)
+            float fallbackRadius)
         {
-            m_DamageAmount = damageAmount;
-            m_KnockbackAmount = knockbackAmount;
+            m_Speed = Mathf.Max(0.01f, speed);
+            m_MaxTravelDistance = Mathf.Max(0.25f, maxTravelDistance);
+            m_TravelDistance = 0f;
             m_LifetimeRemaining = lifetimeSeconds;
-            m_Source = source;
-            m_HasImpacted = false;
+            m_PreviousPosition = transform.position;
 
-            var projectileCollider = EnsureProjectileCollider(Mathf.Max(0.005f, fallbackRadius));
+            EnsureProjectileCollider(Mathf.Max(0.005f, fallbackRadius));
             m_Rigidbody = GetComponent<Rigidbody>();
-            if (m_Rigidbody == null)
-                m_Rigidbody = gameObject.AddComponent<Rigidbody>();
-
-            m_Rigidbody.useGravity = false;
-            m_Rigidbody.isKinematic = false;
-            m_Rigidbody.interpolation = RigidbodyInterpolation.Interpolate;
-            m_Rigidbody.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
-            m_Rigidbody.linearDamping = 0f;
-            m_Rigidbody.angularDamping = 0f;
-            m_Rigidbody.constraints = RigidbodyConstraints.FreezeRotation;
-            m_Rigidbody.linearVelocity = Vector3.zero;
-            m_Rigidbody.angularVelocity = Vector3.zero;
-            m_Rigidbody.linearVelocity = transform.forward * speed;
-
-            if (projectileCollider != null && ignoredColliders != null)
+            if (m_Rigidbody != null)
             {
-                for (var i = 0; i < ignoredColliders.Length; i++)
-                {
-                    var ignoredCollider = ignoredColliders[i];
-                    if (ignoredCollider == null || ignoredCollider == projectileCollider)
-                        continue;
-
-                    Physics.IgnoreCollision(projectileCollider, ignoredCollider, true);
-                }
+                m_Rigidbody.useGravity = false;
+                m_Rigidbody.isKinematic = true;
+                m_Rigidbody.detectCollisions = false;
+                m_Rigidbody.linearVelocity = Vector3.zero;
+                m_Rigidbody.angularVelocity = Vector3.zero;
             }
         }
 
         void Update()
         {
-            if (m_HasImpacted)
+            transform.position += transform.forward * (m_Speed * Time.deltaTime);
+
+            m_TravelDistance += Vector3.Distance(transform.position, m_PreviousPosition);
+            m_PreviousPosition = transform.position;
+            if (m_TravelDistance >= m_MaxTravelDistance)
+            {
+                Destroy(gameObject);
                 return;
+            }
 
             m_LifetimeRemaining -= Time.deltaTime;
             if (m_LifetimeRemaining <= 0f)
                 Destroy(gameObject);
         }
 
-        void OnCollisionEnter(Collision collision)
-        {
-            if (collision == null || collision.collider == null)
-                return;
-
-            var hitPoint = collision.contactCount > 0
-                ? collision.GetContact(0).point
-                : collision.collider.ClosestPoint(transform.position);
-            HandleImpact(collision.collider, hitPoint);
-        }
-
-        void OnTriggerEnter(Collider other)
-        {
-            if (other == null)
-                return;
-
-            HandleImpact(other, other.ClosestPoint(transform.position));
-        }
-
-        void HandleImpact(Collider hitCollider, Vector3 hitPoint)
-        {
-            if (m_HasImpacted || hitCollider == null)
-                return;
-
-            if (m_Source != null && (hitCollider.transform == m_Source.transform || hitCollider.transform.IsChildOf(m_Source.transform)))
-                return;
-
-            m_HasImpacted = true;
-            var damageable = hitCollider.GetComponentInParent<IDamageable>();
-            if (damageable != null)
-                damageable.ApplyDamage(m_DamageAmount, hitPoint, m_Source != null ? m_Source : gameObject);
-
-            if (hitCollider.attachedRigidbody != null && m_KnockbackAmount > 0f)
-                hitCollider.attachedRigidbody.AddForceAtPosition(transform.forward * m_KnockbackAmount, hitPoint, ForceMode.Impulse);
-
-            Destroy(gameObject);
-        }
-
         Collider EnsureProjectileCollider(float fallbackRadius)
         {
-            var existingCollider = GetComponent<Collider>();
-            if (existingCollider != null)
+            var existingColliders = GetComponentsInChildren<Collider>(true);
+            for (var i = 0; i < existingColliders.Length; i++)
             {
-                existingCollider.enabled = true;
-                existingCollider.isTrigger = false;
-                return existingCollider;
+                var existingCollider = existingColliders[i];
+                if (existingCollider != null)
+                    existingCollider.enabled = false;
+            }
+
+            var existingSphereCollider = GetComponent<SphereCollider>();
+            if (existingSphereCollider != null)
+            {
+                existingSphereCollider.enabled = false;
+                return existingSphereCollider;
             }
 
             var bounds = new Bounds(transform.position, Vector3.one * fallbackRadius * 2f);
@@ -720,11 +1147,12 @@ namespace VRCombat.Combat
             }
 
             var sphereCollider = gameObject.AddComponent<SphereCollider>();
-            sphereCollider.isTrigger = false;
+            sphereCollider.isTrigger = true;
             sphereCollider.center = transform.InverseTransformPoint(bounds.center);
             sphereCollider.radius = Mathf.Max(
                 fallbackRadius,
                 Mathf.Max(bounds.extents.x, Mathf.Max(bounds.extents.y, bounds.extents.z)));
+            sphereCollider.enabled = false;
             return sphereCollider;
         }
     }
