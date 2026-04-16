@@ -4,6 +4,7 @@ using UnityEngine;
 using UnityEngine.XR.Interaction.Toolkit.Filtering;
 using UnityEngine.XR.Interaction.Toolkit.Interactables;
 using UnityEngine.XR.Interaction.Toolkit.Interactors;
+using VRCombat.Core;
 
 namespace VRCombat.Combat
 {
@@ -41,10 +42,16 @@ namespace VRCombat.Combat
 
         readonly Dictionary<int, float> m_LastHitTimeByTarget = new Dictionary<int, float>();
         readonly Collider[] m_ProximityFallbackBuffer = new Collider[16];
+        readonly List<ISwingHitModifier> m_HitModifiers = new List<ISwingHitModifier>();
 
         Vector3 m_LastPosition;
         float m_CurrentSpeed;
         IDamageGate m_DamageGate;
+        RunProgressionController m_ProgressionController;
+        WeaponKind m_WeaponKind;
+        bool m_RequiresShieldUnlock;
+
+        public float CurrentSwingSpeed => m_CurrentSpeed;
 
         public void SetDamageGate(MonoBehaviour damageGateSource)
         {
@@ -67,9 +74,20 @@ namespace VRCombat.Combat
                 m_ProximityFallbackRadius = proximityFallbackRadius;
         }
 
+        public void ConfigureRuntimeModifiers(
+            RunProgressionController progressionController,
+            WeaponKind weaponKind,
+            bool requiresShieldUnlock = false)
+        {
+            m_ProgressionController = progressionController;
+            m_WeaponKind = weaponKind;
+            m_RequiresShieldUnlock = requiresShieldUnlock;
+        }
+
         void Awake()
         {
             ResolveDamageGate();
+            ResolveHitModifiers();
         }
 
         void OnValidate()
@@ -81,6 +99,7 @@ namespace VRCombat.Combat
         {
             m_LastPosition = transform.position;
             m_LastHitTimeByTarget.Clear();
+            ResolveHitModifiers();
         }
 
         void Update()
@@ -157,7 +176,17 @@ namespace VRCombat.Combat
 
             var normalizedSwing = Mathf.InverseLerp(m_MinSwingSpeed, m_MaxSwingSpeedForScaling, effectiveSwingSpeed);
             var scaledDamage = m_BaseDamage * Mathf.Lerp(0.6f, 1.6f, normalizedSwing);
+            scaledDamage *= GetDamageMultiplier();
+            var allowHit = scaledDamage > 0f;
+            for (var i = 0; i < m_HitModifiers.Count; i++)
+                m_HitModifiers[i]?.BeforeHit(this, other, hitPoint, ref effectiveSwingSpeed, ref scaledDamage, ref allowHit);
+
+            if (!allowHit || scaledDamage <= 0f)
+                return;
+
             damageable.ApplyDamage(scaledDamage, hitPoint, gameObject);
+            for (var i = 0; i < m_HitModifiers.Count; i++)
+                m_HitModifiers[i]?.AfterHit(this, other, hitPoint, damageable, scaledDamage);
         }
 
         void ResolveDamageGate()
@@ -165,6 +194,17 @@ namespace VRCombat.Combat
             m_DamageGate = m_DamageGateSource as IDamageGate;
             if (m_DamageGateSource != null && m_DamageGate == null)
                 Debug.LogWarning($"{nameof(SwingDamageDealer)} on {name} has a gate source that does not implement {nameof(IDamageGate)}.");
+        }
+
+        void ResolveHitModifiers()
+        {
+            m_HitModifiers.Clear();
+            GetComponentsInParent(true, m_HitModifiers);
+            for (var i = m_HitModifiers.Count - 1; i >= 0; i--)
+            {
+                if (ReferenceEquals(m_HitModifiers[i], this))
+                    m_HitModifiers.RemoveAt(i);
+            }
         }
 
         void TryDealDamageWithProximityFallback()
@@ -201,6 +241,23 @@ namespace VRCombat.Combat
 
                 TryDealDamage(collider, collider.ClosestPoint(transform.position));
             }
+        }
+
+        float GetDamageMultiplier()
+        {
+            if (m_ProgressionController == null)
+                return 1f;
+
+            if (m_RequiresShieldUnlock)
+            {
+                var shieldMultiplier = m_ProgressionController.GetShieldKnockbackDamageMultiplier();
+                if (shieldMultiplier <= 0f)
+                    return 0f;
+
+                return m_ProgressionController.GetWeaponDamageMultiplier(m_WeaponKind) * shieldMultiplier;
+            }
+
+            return m_ProgressionController.GetWeaponDamageMultiplier(m_WeaponKind);
         }
     }
 

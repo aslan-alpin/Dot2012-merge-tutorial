@@ -15,6 +15,17 @@ namespace VRCombat.Enemies
     [RequireComponent(typeof(CapsuleCollider))]
     public class CapsuleEnemy : MonoBehaviour, IDamageable
     {
+        [Header("Scaling")]
+        [SerializeField] EnemyRarity m_Rarity = EnemyRarity.Common;
+        [SerializeField] GameObject m_KeyPrefab;
+        bool m_DropKeyFlag = false;
+        
+        float m_NextAbilityTime = 0f;
+        bool m_IsCharging = false;
+        bool m_IsJumping = false;
+        float m_JumpEndTime = 0f;
+        Vector3 m_ChargeDirection;
+
         [SerializeField]
         float m_MaxHealth = 30f;
 
@@ -132,7 +143,7 @@ namespace VRCombat.Enemies
         XRGrabInteractable m_GrabInteractable;
         MaxGrabDistanceSelectFilter m_GrabDistanceFilter;
         Transform m_Target;
-        Material m_RuntimeMaterial;
+        Material[] m_RuntimeMaterials;
         ParticleSystem m_SplatterParticles;
         float m_CurrentHealth;
         bool m_IsGrabbed;
@@ -199,6 +210,40 @@ namespace VRCombat.Enemies
             }
         }
 
+        public void SetRarity(EnemyRarity rarity, GameObject keyPrefab = null)
+        {
+            m_Rarity = rarity;
+            
+            if (keyPrefab != null)
+            {
+                m_DropKeyFlag = true;
+                m_KeyPrefab = keyPrefab;
+            }
+
+            switch(rarity)
+            {
+                case EnemyRarity.Common:
+                    break;
+                case EnemyRarity.Uncommon:
+                    m_MaxHealth *= 1.25f;
+                    m_ContactDamage *= 1.25f;
+                    m_MoveSpeed *= 1.2f;
+                    break;
+                case EnemyRarity.Rare:
+                    m_MaxHealth *= 1.5f;
+                    m_ContactDamage *= 1.5f;
+                    m_MoveSpeed *= 1.4f;
+                    break;
+                case EnemyRarity.Epic:
+                    m_MaxHealth *= 2f;
+                    m_ContactDamage *= 2f;
+                    m_MoveSpeed *= 1.6f;
+                    break;
+            }
+            m_CurrentHealth = m_MaxHealth;
+            UpdateColor();
+        }
+
         void Awake()
         {
             m_CurrentHealth = m_MaxHealth;
@@ -227,7 +272,7 @@ namespace VRCombat.Enemies
                 m_Renderer = GetComponentInChildren<Renderer>();
 
             if (m_Renderer != null)
-                m_RuntimeMaterial = m_Renderer.material;
+                m_RuntimeMaterials = m_Renderer.materials;
 
             SetupSplatterParticles();
             UpdateColor();
@@ -290,10 +335,61 @@ namespace VRCombat.Enemies
             if (toTarget.sqrMagnitude < 0.0025f)
                 return;
 
+            if (m_Rarity == EnemyRarity.Rare && Time.time > m_NextAbilityTime)
+            {
+                // Jump attack towards player
+                var dir = (m_Target.position - transform.position).normalized;
+                m_Rigidbody.AddForce((dir + Vector3.up * 1.5f) * 5f, ForceMode.Impulse);
+                m_IsJumping = true;
+                m_JumpEndTime = Time.time + 1.0f;
+                m_NextAbilityTime = Time.time + Random.Range(3f, 5f);
+            }
+            else if (m_Rarity == EnemyRarity.Epic && Time.time > m_NextAbilityTime)
+            {
+                if (!m_IsCharging)
+                {
+                    m_IsCharging = true;
+                    m_ChargeDirection = (m_Target.position - transform.position).normalized;
+                    m_ChargeDirection.y = 0;
+                    m_NextAbilityTime = Time.time + 1.5f; // charge duration
+                }
+            }
+
+            if (m_IsCharging)
+            {
+                m_Rigidbody.MovePosition(m_Rigidbody.position + m_ChargeDirection * (m_MoveSpeed * 3f * Time.fixedDeltaTime));
+                if (m_ChargeDirection.sqrMagnitude > 0.001f)
+                {
+                    var targetRot = Quaternion.LookRotation(m_ChargeDirection, Vector3.up);
+                    m_Rigidbody.MoveRotation(Quaternion.Slerp(m_Rigidbody.rotation, targetRot, Time.fixedDeltaTime * 8f));
+                }
+
+                if (Time.time > m_NextAbilityTime)
+                {
+                    m_IsCharging = false;
+                    m_NextAbilityTime = Time.time + Random.Range(4f, 7f);
+                }
+                return;
+            }
+
+            if (m_IsJumping)
+            {
+                if (m_Rigidbody.linearVelocity.y <= 0.1f && Physics.Raycast(transform.position + Vector3.up * 0.1f, Vector3.down, 0.2f))
+                    m_IsJumping = false;
+                else
+                    return; // Let physics carry the jump without MovePosition override
+            }
+
             var desiredDirection = toTarget.normalized;
             var moveDirection = CalculateMoveDirection(currentPosition, desiredDirection);
             var step = moveDirection * (m_MoveSpeed * Time.fixedDeltaTime);
             m_Rigidbody.MovePosition(currentPosition + step);
+
+            if (moveDirection.sqrMagnitude > 0.001f)
+            {
+                var targetRotation = Quaternion.LookRotation(moveDirection, Vector3.up);
+                m_Rigidbody.MoveRotation(Quaternion.Slerp(m_Rigidbody.rotation, targetRotation, 10f * Time.fixedDeltaTime));
+            }
         }
 
         Vector3 CalculateMoveDirection(Vector3 currentPosition, Vector3 desiredDirection)
@@ -561,6 +657,9 @@ namespace VRCombat.Enemies
             m_LastPlayerContactTime = Time.time;
             playerDamageReceiver.ReceiveDamage(m_ContactDamage);
 
+            if (m_AnimationDriver != null)
+                m_AnimationDriver.PlayAttack(0.5f);
+
             var knockbackDirection = playerDamageReceiver.transform.position - transform.position;
             knockbackDirection.y = 0f;
             playerDamageReceiver.ApplyKnockback(
@@ -613,6 +712,8 @@ namespace VRCombat.Enemies
 
             m_IsDying = true;
             m_IsGrabbed = false;
+            
+            Died?.Invoke(this);
 
             if (m_GrabInteractable != null)
                 m_GrabInteractable.enabled = false;
@@ -640,6 +741,13 @@ namespace VRCombat.Enemies
 
             EmitBloodSplatter(hitPoint, m_MaxHealth * 0.35f);
             EmitBleedDecals(hitPoint, m_MaxHealth * 0.12f);
+            
+            if (m_DropKeyFlag && m_KeyPrefab != null)
+            {
+                Instantiate(m_KeyPrefab, transform.position + Vector3.up * 0.5f, Quaternion.identity);
+                m_DropKeyFlag = false;
+            }
+
             StartCoroutine(DeathRoutine());
         }
 
@@ -651,11 +759,20 @@ namespace VRCombat.Enemies
 
         void UpdateColor()
         {
-            if (m_RuntimeMaterial == null)
+            if (m_RuntimeMaterials == null || m_RuntimeMaterials.Length == 0)
                 return;
 
             var normalizedHealth = Mathf.Clamp01(m_CurrentHealth / Mathf.Max(m_MaxHealth, 0.0001f));
-            var baseColor = Color.Lerp(m_DamagedColor, m_HealthyColor, normalizedHealth);
+            
+            Color rarityHealthy = m_HealthyColor;
+            switch(m_Rarity)
+            {
+                case EnemyRarity.Common: rarityHealthy = Color.green; break;
+                case EnemyRarity.Uncommon: rarityHealthy = Color.blue; break;
+                case EnemyRarity.Rare: rarityHealthy = Color.red; break;
+                case EnemyRarity.Epic: rarityHealthy = new Color(1f, 0.84f, 0f); break; // Gold
+            }
+            var baseColor = Color.Lerp(m_DamagedColor, rarityHealthy, normalizedHealth);
 
             var flashElapsed = Time.time - m_LastHitTime;
             var flashStrength = flashElapsed < m_HitFlashDuration
@@ -663,7 +780,9 @@ namespace VRCombat.Enemies
                 : 0f;
 
             var finalColor = Color.Lerp(baseColor, m_HitFlashColor, flashStrength);
-            SetMaterialColor(m_RuntimeMaterial, finalColor);
+            
+            if (m_RuntimeMaterials.Length > 0 && m_RuntimeMaterials[0] != null)
+                SetMaterialColor(m_RuntimeMaterials[0], finalColor);
         }
 
         void SetupSplatterParticles()
@@ -835,6 +954,54 @@ namespace VRCombat.Enemies
 
             if (material.HasProperty(ColorId))
                 material.SetColor(ColorId, color);
+                
+            // Use emission to overpower the base green texture, otherwise they look "darker"
+            if (material.HasProperty("_EmissionColor"))
+            {
+                material.EnableKeyword("_EMISSION");
+                material.SetColor("_EmissionColor", color * 0.15f);
+            }
         }
+        public event System.Action<CapsuleEnemy> Died;
+        
+        public void ApplyStun(float durationSeconds)
+        {
+            // Simple stun implementation
+            m_NextAbilityTime = Mathf.Max(m_NextAbilityTime, Time.time + durationSeconds);
+            m_ResumeChaseAtTime = Time.time + durationSeconds;
+        }
+
+        public void ApplyImpactImpulse(Vector3 direction, float impulse)
+        {
+            m_KnockbackVelocity += direction.normalized * impulse;
+            m_ResumeChaseAtTime = Time.time + 0.5f;
+            m_Rigidbody.AddForce(direction.normalized * impulse, ForceMode.Impulse);
+        }
+
+        public void SetPlayerTarget(Transform cameraTransform, PlayerDamageReceiver damageReceiver)
+        {
+            m_Target = cameraTransform;
+            // Optionally store the damage receiver
+        }
+
+        public void AssignRenderer(Renderer renderer)
+        {
+            m_Renderer = renderer;
+            if (m_Renderer != null)
+            {
+                m_RuntimeMaterials = m_Renderer.materials;
+                UpdateColor();
+            }
+        }
+
+        public void AttachAnimationDriver(GoblinAnimationDriver driver)
+        {
+            m_AnimationDriver = driver;
+        }
+        GoblinAnimationDriver m_AnimationDriver;
+
+        public void ApplySlow(float speedMultiplier, float durationSeconds, GameObject source) {}
+        public void ApplyBurn(float damagePerSecond, float durationSeconds, GameObject source) {}
+
     }
 }

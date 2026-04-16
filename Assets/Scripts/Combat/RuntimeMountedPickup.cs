@@ -78,7 +78,11 @@ namespace VRCombat.Combat
             if (m_HasMountedPose)
                 transform.SetPositionAndRotation(m_MountedPosition, m_MountedRotation);
 
-            m_RiggedChainWeapon?.SetMountedState(true);
+            if (m_RiggedChainWeapon != null)
+            {
+                m_RiggedChainWeapon.SetHeldState(false);
+                m_RiggedChainWeapon.SetMountedState(true);
+            }
         }
 
         void ApplyHeldState()
@@ -96,7 +100,11 @@ namespace VRCombat.Combat
             m_Rigidbody.interpolation = RigidbodyInterpolation.None;
             m_Rigidbody.WakeUp();
 
-            m_RiggedChainWeapon?.SetMountedState(false);
+            if (m_RiggedChainWeapon != null)
+            {
+                m_RiggedChainWeapon.SetMountedState(false);
+                m_RiggedChainWeapon.SetHeldState(true);
+            }
         }
 
         void ApplyDroppedState()
@@ -110,7 +118,11 @@ namespace VRCombat.Combat
             m_Rigidbody.interpolation = RigidbodyInterpolation.Interpolate;
             m_Rigidbody.WakeUp();
 
-            m_RiggedChainWeapon?.SetMountedState(false);
+            if (m_RiggedChainWeapon != null)
+            {
+                m_RiggedChainWeapon.SetMountedState(false);
+                m_RiggedChainWeapon.SetHeldState(false);
+            }
         }
     }
 }

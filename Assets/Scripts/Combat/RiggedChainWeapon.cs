@@ -9,19 +9,28 @@ namespace VRCombat.Combat
         const string ArmatureNameToken = "armature";
         const string BoneNameToken = "bone";
         const string BoneEndNameToken = "_end";
+        const int ActiveTailCollisionSegments = 3;
+        const int MaxSimulatedBones = 12;
+        const float HoldSettleDurationSeconds = 0.08f;
 
         readonly List<Rigidbody> m_SegmentBodies = new List<Rigidbody>();
         readonly List<Transform> m_SimulatedBones = new List<Transform>();
         readonly List<Vector3> m_RestLocalPositions = new List<Vector3>();
         readonly List<Quaternion> m_RestLocalRotations = new List<Quaternion>();
         readonly List<Collider> m_SegmentColliders = new List<Collider>();
+        readonly List<ConfigurableJoint> m_SegmentJoints = new List<ConfigurableJoint>();
+
+        Rigidbody m_HandleBody;
+        Collider m_HoldCollider;
         SwingDamageDealer m_TipDamageDealer;
         Transform m_SimulationRoot;
-        Vector3 m_SimulationRootLocalPosition;
-        Quaternion m_SimulationRootLocalRotation = Quaternion.identity;
-        bool m_HasDetachedSimulationRoot;
+        float m_RootSpring;
+        float m_SegmentSpring;
+        float m_JointDamper;
         bool m_IsInitialized;
         bool m_IsMounted;
+        bool m_IsHeld;
+        float m_SettleUntilTime;
 
         public bool Initialize(
             Rigidbody handleBody,
@@ -41,8 +50,13 @@ namespace VRCombat.Combat
             if (handleBody == null)
                 return false;
 
+            m_HandleBody = handleBody;
+            m_HoldCollider = holdCollider;
+            m_RootSpring = Mathf.Max(0f, rootSpring);
+            m_SegmentSpring = Mathf.Max(0f, segmentSpring);
+            m_JointDamper = Mathf.Max(0f, damper);
             DisableImportedAnimation();
-            DetachSimulationRootIfNeeded();
+            m_SimulationRoot = FindSimulationRoot();
 
             var chainBones = CollectChainBones(m_SimulationRoot != null ? m_SimulationRoot : transform);
             if (chainBones.Count < 3)
@@ -56,8 +70,9 @@ namespace VRCombat.Combat
             m_RestLocalPositions.Clear();
             m_RestLocalRotations.Clear();
             m_SegmentColliders.Clear();
+            m_SegmentJoints.Clear();
 
-            var simulatedBones = SampleChainBones(chainBones, boneStep);
+            var simulatedBones = LimitSampledBones(chainBones, MaxSimulatedBones);
             if (simulatedBones.Count < 3)
             {
                 Debug.LogWarning($"{nameof(RiggedChainWeapon)} on {name} does not have enough sampled bones to simulate.");
@@ -68,27 +83,31 @@ namespace VRCombat.Combat
             for (var i = 0; i < simulatedBones.Count; i++)
             {
                 var bone = simulatedBones[i];
-                var colliderRadius = i == simulatedBones.Count - 1
+                var isTip = i == simulatedBones.Count - 1;
+                var colliderRadius = isTip
                     ? Mathf.Max(segmentRadius, tipRadius)
                     : Mathf.Max(0.005f, EstimateSegmentRadius(bone, simulatedBones, i, segmentRadius));
 
-                var body = EnsureSegmentBody(bone, colliderRadius, segmentMass, i == simulatedBones.Count - 1);
-                ConfigureJoint(
+                var body = EnsureSegmentBody(bone, colliderRadius, segmentMass, isTip);
+                var joint = ConfigureJoint(
                     bone,
                     body,
                     previousBody,
-                    i == 0 ? 42f : 58f,
-                    i == 0 ? rootSpring : segmentSpring,
-                    damper);
+                    i == 0 ? 80f : 120f,
+                    i == 0 ? m_RootSpring : m_SegmentSpring,
+                    m_JointDamper);
 
                 m_SegmentBodies.Add(body);
                 m_SimulatedBones.Add(bone);
                 m_RestLocalPositions.Add(bone.localPosition);
                 m_RestLocalRotations.Add(bone.localRotation);
+                m_SegmentColliders.Add(body.GetComponent<Collider>());
+                if (joint != null)
+                    m_SegmentJoints.Add(joint);
                 previousBody = body;
             }
 
-            IgnoreInternalCollisions(holdCollider);
+            IgnoreInternalCollisions();
             m_TipDamageDealer = ConfigureTipDamage(
                 simulatedBones[simulatedBones.Count - 1],
                 baseDamage,
@@ -96,9 +115,11 @@ namespace VRCombat.Combat
                 maxSwingSpeedForScaling,
                 hitCooldownSeconds,
                 tipRadius * 1.8f);
-            m_IsInitialized = true;
-            SetMountedState(true);
 
+            m_IsInitialized = true;
+            m_IsMounted = false;
+            m_IsHeld = false;
+            SetMountedState(true);
             return true;
         }
 
@@ -113,52 +134,68 @@ namespace VRCombat.Combat
             m_IsMounted = mounted;
             if (mounted)
             {
-                SetSegmentBodiesDynamicState(false);
-                SyncSimulationRootToHandlePose();
                 RestoreRestPose();
-                SetSegmentCollidersEnabled(false);
+                SyncBodiesToBonePose();
+                SetSegmentBodiesDynamicState(false, held: false);
+                SetTailCollidersEnabled(false);
                 if (m_TipDamageDealer != null)
                     m_TipDamageDealer.enabled = false;
+
                 Physics.SyncTransforms();
                 return;
             }
 
-            SyncSimulationRootToHandlePose();
             RestoreRestPose();
+            SyncBodiesToBonePose();
+            ApplyFreeState();
+            m_SettleUntilTime = Time.time + HoldSettleDurationSeconds;
             Physics.SyncTransforms();
-            SetSegmentCollidersEnabled(true);
+        }
+
+        public void SetHeldState(bool held)
+        {
+            if (!m_IsInitialized)
+                return;
+
+            if (m_IsHeld == held)
+                return;
+
+            m_IsHeld = held;
+            if (!m_IsMounted)
+            {
+                ApplyFreeState();
+                m_SettleUntilTime = Time.time + HoldSettleDurationSeconds;
+            }
+        }
+
+        void FixedUpdate()
+        {
+            if (!m_IsInitialized || m_IsMounted)
+                return;
+
+            if (Time.time < m_SettleUntilTime)
+                ApplySettleDamping();
+
+            var maxLinearVelocity = m_IsHeld ? 80f : 80f;
+            var maxAngularVelocity = 120f;
+            for (var i = 0; i < m_SegmentBodies.Count; i++)
+            {
+                var body = m_SegmentBodies[i];
+                if (body == null)
+                    continue;
+
+                body.linearVelocity = Vector3.ClampMagnitude(body.linearVelocity, maxLinearVelocity);
+                body.angularVelocity = Vector3.ClampMagnitude(body.angularVelocity, maxAngularVelocity);
+            }
+        }
+
+        void ApplyFreeState()
+        {
+            SetSegmentBodiesDynamicState(true, m_IsHeld);
+            ConfigureJointsForState(m_IsHeld);
+            SetTailCollidersEnabled(true);
             if (m_TipDamageDealer != null)
                 m_TipDamageDealer.enabled = true;
-            SetSegmentBodiesDynamicState(true);
-        }
-
-        void OnDestroy()
-        {
-            if (m_HasDetachedSimulationRoot && m_SimulationRoot != null)
-                Destroy(m_SimulationRoot.gameObject);
-        }
-
-        void DetachSimulationRootIfNeeded()
-        {
-            if (m_HasDetachedSimulationRoot)
-                return;
-
-            var simulationRoot = FindSimulationRoot();
-            if (simulationRoot == null || simulationRoot == transform)
-                return;
-
-            m_SimulationRoot = simulationRoot;
-            m_SimulationRootLocalPosition = transform.InverseTransformPoint(simulationRoot.position);
-            m_SimulationRootLocalRotation = Quaternion.Inverse(transform.rotation) * simulationRoot.rotation;
-
-            var ownership = simulationRoot.GetComponent<DetachedRuntimeOwner>();
-            if (ownership == null)
-                ownership = simulationRoot.gameObject.AddComponent<DetachedRuntimeOwner>();
-            ownership.Configure(gameObject);
-
-            simulationRoot.SetParent(null, true);
-            m_HasDetachedSimulationRoot = true;
-            SyncSimulationRootToHandlePose();
         }
 
         Transform FindSimulationRoot()
@@ -177,16 +214,6 @@ namespace VRCombat.Combat
             return null;
         }
 
-        void SyncSimulationRootToHandlePose()
-        {
-            if (m_SimulationRoot == null)
-                return;
-
-            m_SimulationRoot.SetPositionAndRotation(
-                transform.TransformPoint(m_SimulationRootLocalPosition),
-                transform.rotation * m_SimulationRootLocalRotation);
-        }
-
         List<Transform> CollectChainBones(Transform searchRoot)
         {
             if (searchRoot == null)
@@ -201,10 +228,8 @@ namespace VRCombat.Combat
                 for (var i = 0; i < allTransforms.Length; i++)
                 {
                     var candidate = allTransforms[i];
-                    if (candidate == null)
-                        continue;
-
-                    if (candidate.name.IndexOf(ArmatureNameToken, System.StringComparison.OrdinalIgnoreCase) >= 0)
+                    if (candidate != null &&
+                        candidate.name.IndexOf(ArmatureNameToken, System.StringComparison.OrdinalIgnoreCase) >= 0)
                     {
                         armature = candidate;
                         break;
@@ -227,11 +252,11 @@ namespace VRCombat.Combat
                     continue;
 
                 var depth = GetDepth(candidate);
-                if (depth < shallowestDepth)
-                {
-                    shallowestDepth = depth;
-                    rootBone = candidate;
-                }
+                if (depth >= shallowestDepth)
+                    continue;
+
+                shallowestDepth = depth;
+                rootBone = candidate;
             }
 
             var chainBones = new List<Transform>();
@@ -262,6 +287,34 @@ namespace VRCombat.Combat
             return sampledBones;
         }
 
+        static List<Transform> LimitSampledBones(IReadOnlyList<Transform> sampledBones, int maxBones)
+        {
+            var limitedBones = new List<Transform>();
+            if (sampledBones == null || sampledBones.Count == 0)
+                return limitedBones;
+
+            maxBones = Mathf.Max(3, maxBones);
+            if (sampledBones.Count <= maxBones)
+            {
+                limitedBones.AddRange(sampledBones);
+                return limitedBones;
+            }
+
+            var step = (sampledBones.Count - 1f) / (maxBones - 1f);
+            for (var i = 0; i < maxBones; i++)
+            {
+                var index = Mathf.Clamp(Mathf.RoundToInt(step * i), 0, sampledBones.Count - 1);
+                var bone = sampledBones[index];
+                if (limitedBones.Count == 0 || !ReferenceEquals(limitedBones[limitedBones.Count - 1], bone))
+                    limitedBones.Add(bone);
+            }
+
+            if (!ReferenceEquals(limitedBones[limitedBones.Count - 1], sampledBones[sampledBones.Count - 1]))
+                limitedBones.Add(sampledBones[sampledBones.Count - 1]);
+
+            return limitedBones;
+        }
+
         Rigidbody EnsureSegmentBody(Transform bone, float colliderRadius, float segmentMass, bool isTip)
         {
             var body = bone.GetComponent<Rigidbody>();
@@ -270,11 +323,11 @@ namespace VRCombat.Combat
 
             body.mass = Mathf.Max(0.01f, isTip ? segmentMass * 0.9f : segmentMass);
             body.useGravity = true;
-            body.linearDamping = isTip ? 0.2f : 0.5f;
-            body.angularDamping = isTip ? 0.1f : 0.25f;
-            body.solverIterations = 32;
-            body.solverVelocityIterations = 16;
-            body.maxAngularVelocity = 50f;
+            body.linearDamping = isTip ? 0.05f : 0.09f;
+            body.angularDamping = isTip ? 0.04f : 0.08f;
+            body.solverIterations = 36;
+            body.solverVelocityIterations = 14;
+            body.maxAngularVelocity = 120f;
             body.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
             body.interpolation = RigidbodyInterpolation.Interpolate;
 
@@ -284,12 +337,10 @@ namespace VRCombat.Combat
 
             sphereCollider.radius = colliderRadius;
             sphereCollider.isTrigger = false;
-            m_SegmentColliders.Add(sphereCollider);
-
             return body;
         }
 
-        static void ConfigureJoint(
+        static ConfigurableJoint ConfigureJoint(
             Transform bone,
             Rigidbody body,
             Rigidbody connectedBody,
@@ -298,57 +349,44 @@ namespace VRCombat.Combat
             float damper)
         {
             if (bone == null || body == null || connectedBody == null)
-                return;
+                return null;
 
             var joint = bone.GetComponent<ConfigurableJoint>();
             if (joint == null)
                 joint = bone.gameObject.AddComponent<ConfigurableJoint>();
 
             joint.connectedBody = connectedBody;
-            joint.autoConfigureConnectedAnchor = false;
+            joint.autoConfigureConnectedAnchor = true;
             joint.anchor = Vector3.zero;
-            joint.connectedAnchor = connectedBody.transform.InverseTransformPoint(bone.position);
             joint.xMotion = ConfigurableJointMotion.Locked;
             joint.yMotion = ConfigurableJointMotion.Locked;
             joint.zMotion = ConfigurableJointMotion.Locked;
             joint.angularXMotion = ConfigurableJointMotion.Limited;
             joint.angularYMotion = ConfigurableJointMotion.Limited;
             joint.angularZMotion = ConfigurableJointMotion.Limited;
-            joint.projectionMode = JointProjectionMode.None;
-            joint.projectionDistance = 0f;
-            joint.projectionAngle = 0f;
+            joint.projectionMode = JointProjectionMode.PositionAndRotation;
             joint.enablePreprocessing = true;
-            joint.massScale = 1f;
-            joint.connectedMassScale = 1f;
+            joint.breakForce = float.PositiveInfinity;
+            joint.breakTorque = float.PositiveInfinity;
+            joint.massScale = 1.5f;
+            joint.connectedMassScale = 1.5f;
+            joint.rotationDriveMode = RotationDriveMode.Slerp;
 
-            var softJointLimit = new SoftJointLimit
-            {
-                limit = angularLimitDegrees
-            };
-
-            var softJointLimitSpring = new SoftJointLimitSpring
-            {
-                spring = spring,
-                damper = damper
-            };
-
-            joint.linearLimitSpring = softJointLimitSpring;
             var drive = new JointDrive
             {
                 positionSpring = spring,
                 positionDamper = damper,
                 maximumForce = float.MaxValue
             };
-            joint.angularXDrive = drive;
-            joint.angularYZDrive = drive;
-
+            joint.slerpDrive = drive;
             joint.lowAngularXLimit = new SoftJointLimit { limit = -angularLimitDegrees };
             joint.highAngularXLimit = new SoftJointLimit { limit = angularLimitDegrees };
             joint.angularYLimit = new SoftJointLimit { limit = angularLimitDegrees };
             joint.angularZLimit = new SoftJointLimit { limit = angularLimitDegrees };
+            return joint;
         }
 
-        void IgnoreInternalCollisions(Collider holdCollider)
+        void IgnoreInternalCollisions()
         {
             for (var i = 0; i < m_SegmentColliders.Count; i++)
             {
@@ -356,16 +394,14 @@ namespace VRCombat.Combat
                 if (current == null)
                     continue;
 
-                if (holdCollider != null)
-                    Physics.IgnoreCollision(holdCollider, current, true);
+                if (m_HoldCollider != null)
+                    Physics.IgnoreCollision(m_HoldCollider, current, true);
 
                 for (var j = i + 1; j < m_SegmentColliders.Count; j++)
                 {
                     var other = m_SegmentColliders[j];
-                    if (other == null)
-                        continue;
-
-                    Physics.IgnoreCollision(current, other, true);
+                    if (other != null)
+                        Physics.IgnoreCollision(current, other, true);
                 }
             }
         }
@@ -472,7 +508,23 @@ namespace VRCombat.Combat
             }
         }
 
-        void SetSegmentBodiesDynamicState(bool enabled)
+        void SyncBodiesToBonePose()
+        {
+            for (var i = 0; i < m_SegmentBodies.Count; i++)
+            {
+                var body = m_SegmentBodies[i];
+                var bone = i < m_SimulatedBones.Count ? m_SimulatedBones[i] : null;
+                if (body == null || bone == null)
+                    continue;
+
+                body.position = bone.position;
+                body.rotation = bone.rotation;
+                body.linearVelocity = Vector3.zero;
+                body.angularVelocity = Vector3.zero;
+            }
+        }
+
+        void SetSegmentBodiesDynamicState(bool enabled, bool held)
         {
             for (var i = 0; i < m_SegmentBodies.Count; i++)
             {
@@ -484,21 +536,70 @@ namespace VRCombat.Combat
                 body.angularVelocity = Vector3.zero;
                 body.isKinematic = !enabled;
                 body.useGravity = enabled;
+                body.linearDamping = enabled
+                    ? held ? (i >= m_SegmentBodies.Count - 2 ? 0.05f : 0.09f) : (i >= m_SegmentBodies.Count - 1 ? 0.12f : 0.18f)
+                    : 1.6f;
+                body.angularDamping = enabled
+                    ? held ? (i >= m_SegmentBodies.Count - 2 ? 0.04f : 0.08f) : (i >= m_SegmentBodies.Count - 1 ? 0.1f : 0.16f)
+                    : 1.75f;
+                body.maxAngularVelocity = 120f;
                 body.collisionDetectionMode = enabled
                     ? CollisionDetectionMode.ContinuousDynamic
                     : CollisionDetectionMode.ContinuousSpeculative;
+                body.interpolation = enabled
+                    ? RigidbodyInterpolation.Interpolate
+                    : RigidbodyInterpolation.None;
 
                 if (enabled)
                     body.WakeUp();
             }
         }
 
-        void SetSegmentCollidersEnabled(bool enabled)
+        void SetTailCollidersEnabled(bool enabled)
         {
+            var firstActiveIndex = Mathf.Max(0, m_SegmentColliders.Count - ActiveTailCollisionSegments);
             for (var i = 0; i < m_SegmentColliders.Count; i++)
             {
-                if (m_SegmentColliders[i] != null)
-                    m_SegmentColliders[i].enabled = enabled;
+                var collider = m_SegmentColliders[i];
+                if (collider != null)
+                    collider.enabled = enabled && i >= firstActiveIndex;
+            }
+        }
+
+        void ConfigureJointsForState(bool held)
+        {
+            for (var i = 0; i < m_SegmentJoints.Count; i++)
+            {
+                var joint = m_SegmentJoints[i];
+                if (joint == null)
+                    continue;
+
+                var baseSpring = i == 0 ? m_RootSpring : m_SegmentSpring;
+                var angularLimit = held
+                    ? (i == 0 ? 100f : 140f)
+                    : (i == 0 ? 90f : 120f);
+                var drive = joint.slerpDrive;
+                drive.positionSpring = held ? baseSpring * 0.55f : baseSpring * 0.05f;
+                drive.positionDamper = held ? Mathf.Max(0.1f, m_JointDamper * 0.75f) : Mathf.Max(0.1f, m_JointDamper * 0.7f);
+                drive.maximumForce = float.MaxValue;
+                joint.slerpDrive = drive;
+                joint.lowAngularXLimit = new SoftJointLimit { limit = -angularLimit };
+                joint.highAngularXLimit = new SoftJointLimit { limit = angularLimit };
+                joint.angularYLimit = new SoftJointLimit { limit = angularLimit };
+                joint.angularZLimit = new SoftJointLimit { limit = angularLimit };
+            }
+        }
+
+        void ApplySettleDamping()
+        {
+            for (var i = 0; i < m_SegmentBodies.Count; i++)
+            {
+                var body = m_SegmentBodies[i];
+                if (body == null)
+                    continue;
+
+                body.linearVelocity *= 0.85f;
+                body.angularVelocity *= 0.82f;
             }
         }
     }

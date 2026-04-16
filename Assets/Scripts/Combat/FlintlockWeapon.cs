@@ -5,6 +5,7 @@ using UnityEngine.XR;
 using UnityEngine.XR.Interaction.Toolkit;
 using UnityEngine.XR.Interaction.Toolkit.Interactables;
 using UnityEngine.XR.Interaction.Toolkit.Interactors;
+using VRCombat.Core;
 using XRCommonUsages = UnityEngine.XR.CommonUsages;
 using XRInputDevice = UnityEngine.XR.InputDevice;
 
@@ -95,6 +96,13 @@ namespace VRCombat.Combat
         bool m_WasHeldReloadPressed;
         float m_ReloadCompleteTime = -1f;
         static readonly RaycastHit[] s_ShotHitBuffer = new RaycastHit[16];
+
+        RunProgressionController m_ProgressionController;
+
+        public void ConfigureRuntimeModifiers(RunProgressionController progressionController)
+        {
+            m_ProgressionController = progressionController;
+        }
 
         void Awake()
         {
@@ -273,7 +281,7 @@ namespace VRCombat.Combat
             return m_GripAttachTransform;
         }
 
-        void CacheAttachedBulletPose()
+        public void CacheAttachedBulletPose()
         {
             if (attachedBullet == null)
                 return;
@@ -824,7 +832,13 @@ namespace VRCombat.Combat
                 return;
 
             if (TryResolveDamageable(impact.collider, out var damageable))
-                damageable.ApplyDamage(damageAmount, impact.point, gameObject);
+            {
+                var adjustedDamage = damageAmount;
+                if (m_ProgressionController != null)
+                    adjustedDamage *= m_ProgressionController.GetWeaponDamageMultiplier(WeaponKind.Flintlock);
+
+                damageable.ApplyDamage(adjustedDamage, impact.point, gameObject);
+            }
 
             var impactRigidbody = impact.rigidbody != null ? impact.rigidbody : impact.collider.attachedRigidbody;
             if (impactRigidbody != null && knockbackAmount > 0f)
@@ -988,24 +1002,7 @@ namespace VRCombat.Combat
         bool TryGetFallbackAttachedBulletLocalPosition(Transform parent, out Vector3 localPosition)
         {
             localPosition = Vector3.zero;
-            if (parent == null || raycastOrigin == null)
-            {
-                return false;
-            }
-
-            var fallbackDirection = raycastOrigin.forward.sqrMagnitude > MinimumDirectionMagnitude
-                ? raycastOrigin.forward.normalized
-                : transform.forward.normalized;
-            if (fallbackDirection.sqrMagnitude <= MinimumDirectionMagnitude)
-                return false;
-
-            var worldSeatPosition = raycastOrigin.position - fallbackDirection * AttachedBulletFallbackSeatDistance;
-            var authoredWorldPosition = parent.TransformPoint(m_AttachedBulletLocalPosition);
-            if ((authoredWorldPosition - worldSeatPosition).sqrMagnitude < AttachedBulletFallbackDistanceThreshold * AttachedBulletFallbackDistanceThreshold)
-                return false;
-
-            localPosition = parent.InverseTransformPoint(worldSeatPosition);
-            return true;
+            return false;
         }
 
         Collider[] CollectIgnoredProjectileColliders()
@@ -1014,9 +1011,10 @@ namespace VRCombat.Combat
             if (m_HoldingInteractor == null)
                 return weaponColliders;
 
-            var interactorColliders = m_HoldingInteractor.transform != null
-                ? m_HoldingInteractor.transform.GetComponentsInChildren<Collider>(true)
-                : System.Array.Empty<Collider>();
+            var playerReceiver = m_HoldingInteractor.transform.GetComponentInParent<Unity.XR.CoreUtils.XROrigin>();
+            var interactorColliders = playerReceiver != null
+                ? playerReceiver.GetComponentsInChildren<Collider>(true)
+                : m_HoldingInteractor.transform.GetComponentsInChildren<Collider>(true);
 
             if (interactorColliders.Length == 0)
                 return weaponColliders;

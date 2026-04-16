@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Chains and Sorcery - Expanded GDD</title>
+  <style>
+    body {
+      font-family: Georgia, "Times New Roman", serif;
+      line-height: 1.55;
+      color: #222;
+      max-width: 900px;
+      margin: 40px auto;
+      padding: 0 18px 36px;
+    }
+
+    h1, h2, h3 {
+      font-family: Helvetica, Arial, sans-serif;
+      color: #111;
+    }
+
+    h1 {
+      margin-bottom: 6px;
+    }
+
+    h2 {
+      margin-top: 32px;
+      border-bottom: 1px solid #ddd;
+      padding-bottom: 6px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 14px 0 22px;
+    }
+
+    th, td {
+      border: 1px solid #ddd;
+      padding: 10px;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      width: 28%;
+      background: #f5f5f5;
+    }
+
+    ul {
+      margin-top: 8px;
+    }
+
+    .meta p {
+      margin: 4px 0;
+    }
+
+    .note {
+      background: #f8f8f2;
+      border-left: 4px solid #b28b3d;
+      padding: 12px 14px;
+      margin: 18px 0 24px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Chains and Sorcery</h1>
+  <p><strong>Game Design Document</strong></p>
+
+  <div class="meta">
+    <p><strong>Document Version:</strong> 2026.1.2</p>
+    <p><strong>Original Release Date:</strong> 15.03.2026</p>
+    <p><strong>Last Update Date:</strong> 02.04.2026</p>
+    <p><strong>Document License:</strong> Dotiverse - Game Design Document &copy; 2026 Dotiverse. All rights reserved.</p>
+  </div>
+
+  <div class="note">
+    This version translates the original Turkish GDD into English and expands it into a clearer, more production-ready outline while preserving the same core idea, tone, and team authorship.
+  </div>
+
+  <h2>1. Project Overview</h2>
+  <table>
+    <tr>
+      <th>Game Name</th>
+      <td>Chains and Sorcery</td>
+    </tr>
+    <tr>
+      <th>Team Name</th>
+      <td>Dotiverse</td>
+    </tr>
+    <tr>
+      <th>Team Members</th>
+      <td>
+        Ahmet Bahsi - Game Designer, Level Designer, Art Designer<br>
+        Alp Aslan Ozyurt - Game Developer, Project Manager, Sound Designer<br>
+        Tugce Nur Buyukkaya - Art Designer
+      </td>
+    </tr>
+    <tr>
+      <th>Genre</th>
+      <td>Action Roguelite / Arena Combat</td>
+    </tr>
+    <tr>
+      <th>Theme</th>
+      <td>Captivity, brutality, dark fantasy, and the struggle for freedom</td>
+    </tr>
+    <tr>
+      <th>Target Audience</th>
+      <td>ESRB M17+ due to combat violence, dark setting, and oppressive subject matter</td>
+    </tr>
+    <tr>
+      <th>Platforms</th>
+      <td>PC (Windows)</td>
+    </tr>
+    <tr>
+      <th>Engine / Tech</th>
+      <td>Unity, C#, Blender, Procreate, FL Studio, Audacity, GitHub, Google Docs, Canva</td>
+    </tr>
+    <tr>
+      <th>High Concept</th>
+      <td>A slave awakens in chains, breaks free, and turns the very symbol of captivity into a weapon. The player escapes a dungeon, enters a deadly arena, survives escalating waves of enemies, scavenges and upgrades weapons, masters sorcery, and defeats the boss at the summit to earn freedom.</td>
+    </tr>
+  </table>
+
+  <h2>2. Core Fantasy</h2>
+  <p>
+    <em>Chains and Sorcery</em> is about rising from powerlessness to dominance. The player starts in a vulnerable state with almost nothing, then gradually becomes a dangerous arena fighter by learning how to survive, improvise, and weaponize both steel and magic.
+  </p>
+  <p>
+    The emotional arc should move from desperation to confidence. The early minutes feel tense and claustrophobic, while the late game should feel fierce, fast, and triumphant.
+  </p>
+
+  <h2>3. Design Pillars</h2>
+  <ul>
+    <li><strong>Turn weakness into strength:</strong> the broken chain is both a story symbol and a signature weapon.</li>
+    <li><strong>Simple but satisfying combat:</strong> every hit should feel readable, heavy, and rewarding.</li>
+    <li><strong>Run-to-run variety:</strong> players should adapt based on found weapons, upgrades, and spell choices.</li>
+    <li><strong>Clear upward progression:</strong> climbing the arena should always feel like advancing toward freedom.</li>
+    <li><strong>Focused scope:</strong> the game should stay compact and achievable for a student or indie production.</li>
+  </ul>
+
+  <h2>4. Narrative Premise and World</h2>
+  <p>
+    The game takes place in a dark fantasy world populated by goblins, giant creatures, and magic users. The protagonist begins as a chained prisoner in a dungeon beneath a brutal combat arena. Their captors force prisoners to fight for spectacle, survival, and control.
+  </p>
+  <p>
+    The opening scene begins in confinement. The player wakes up chained, breaks those chains, and immediately uses them as a weapon to fight through a corridor that leads to the arena. From there, the character climbs toward the top floor by surviving wave-based battles. At the peak waits a Hobgoblin champion or warden who represents both the arena's power and the player's final obstacle to freedom.
+  </p>
+
+  <h2>5. Intended Player Experience</h2>
+  <p>
+    The player experience should be intense, readable, and empowering. The game begins with close-quarters survival, then opens into repeatable combat loops where players grow stronger, make quick upgrade decisions, and adapt to increasing enemy pressure.
+  </p>
+  <p>
+    The point of view should support immediacy and impact. Regardless of final camera choice, the design should prioritize clear attacks, readable enemy telegraphs, and a strong sense of physical presence in the arena.
+  </p>
+
+  <h2>6. Core Gameplay Loop</h2>
+  <ol>
+    <li>Wake up in chains inside a dungeon cell or prison corridor.</li>
+    <li>Break free and use the chain as the first weapon.</li>
+    <li>Reach the arena and survive enemy waves.</li>
+    <li>Collect weapons, healing, or magical upgrades between fights.</li>
+    <li>Move upward through increasingly difficult arena layers.</li>
+    <li>Defeat elite enemies and the final boss.</li>
+    <li>Earn freedom and complete the run.</li>
+  </ol>
+  <p>
+    For repeatability, each run should vary through enemy combinations, weapon drops, upgrade choices, and pacing differences between floors.
+  </p>
+
+  <h2>7. Combat Systems</h2>
+  <h3>7.1 Signature Weapon: The Chain</h3>
+  <p>
+    The chain is the most important identity mechanic in the game. It starts as a crude survival tool, but can evolve into a versatile weapon with range, crowd control, and magical synergy.
+  </p>
+  <ul>
+    <li>Short-range whip attacks for crowd spacing</li>
+    <li>Heavy swing attacks for stagger or knockback</li>
+    <li>Potential pull or bind effects for controlling priority enemies</li>
+    <li>Upgradeable elemental variants such as fire, lightning, or curse</li>
+  </ul>
+
+  <h3>7.2 Secondary Weapons</h3>
+  <p>
+    The player can discover or temporarily equip arena weapons. These should be easy to understand and mechanically distinct.
+  </p>
+  <ul>
+    <li>Dagger: fast attacks, lower reach, useful for finishing weak enemies</li>
+    <li>Sword: balanced damage and control</li>
+    <li>Shield: defensive option that supports survivability and staggers</li>
+    <li>Flintlock or rare ranged weapon: limited but powerful burst option</li>
+  </ul>
+
+  <h3>7.3 Sorcery</h3>
+  <p>
+    Sorcery should complement weapons rather than replace them. Magic adds tactical variety and helps the player create a build identity during a run.
+  </p>
+  <ul>
+    <li>Shock spell that stuns or interrupts groups</li>
+    <li>Fire spell that burns enemies over time</li>
+    <li>Dash or blink spell for repositioning</li>
+    <li>Chain enchantment that buffs reach, damage, or crowd control</li>
+  </ul>
+
+  <h3>7.4 Resource and Upgrade Model</h3>
+  <p>
+    A light roguelite structure is recommended. After waves or mini-boss milestones, players choose one of several upgrades. These can improve damage, defense, mobility, chain effects, spell power, or utility.
+  </p>
+  <ul>
+    <li>Increase chain damage and swing speed</li>
+    <li>Add bleed, burn, or shock effects</li>
+    <li>Boost health or armor</li>
+    <li>Reduce spell cooldowns</li>
+    <li>Gain bonus damage after perfect dodges or staggers</li>
+  </ul>
+
+  <h2>8. Progression Structure</h2>
+  <table>
+    <tr>
+      <th>Phase</th>
+      <th>Description</th>
+    </tr>
+    <tr>
+      <td>Prologue</td>
+      <td>A short dungeon tutorial that teaches movement, the first attack, and the fantasy of breaking free.</td>
+    </tr>
+    <tr>
+      <td>Lower Arena</td>
+      <td>Early waves with basic goblin enemies. The player learns crowd control, pickups, and timing.</td>
+    </tr>
+    <tr>
+      <td>Mid Arena</td>
+      <td>Enemy variety increases. Ranged attacks, armored units, and magic users force more adaptation.</td>
+    </tr>
+    <tr>
+      <td>Upper Arena</td>
+      <td>Heavier enemy density, elites, and stronger combinations create a final survival test.</td>
+    </tr>
+    <tr>
+      <td>Boss Floor</td>
+      <td>The Hobgoblin boss encounter tests movement, pattern recognition, and the player's chosen build.</td>
+    </tr>
+  </table>
+
+  <h2>9. Enemy Roster</h2>
+  <table>
+    <tr>
+      <th>Enemy</th>
+      <th>Role</th>
+    </tr>
+    <tr>
+      <td>Goblin Grunt</td>
+      <td>Basic melee unit. Fast to read, easy to defeat, used for early pressure.</td>
+    </tr>
+    <tr>
+      <td>Goblin Spearman</td>
+      <td>Mid-range threat that punishes reckless approach and spacing mistakes.</td>
+    </tr>
+    <tr>
+      <td>Goblin Shaman</td>
+      <td>Support or ranged caster that pressures movement and becomes a priority target.</td>
+    </tr>
+    <tr>
+      <td>Brute / Giant</td>
+      <td>Slow but powerful enemy with heavy stagger resistance and area denial attacks.</td>
+    </tr>
+    <tr>
+      <td>Hobgoblin Boss</td>
+      <td>Final encounter. A durable elite with multiple phases, stronger attacks, and commanding presence.</td>
+    </tr>
+  </table>
+
+  <h2>10. Boss Concept</h2>
+  <p>
+    The Hobgoblin boss should feel like the ruler of the arena: armored, disciplined, and far more dangerous than regular enemies. The fight can be built around two or three readable phases.
+  </p>
+  <ul>
+    <li><strong>Phase 1:</strong> measured melee attacks, shield pressure, and punish windows</li>
+    <li><strong>Phase 2:</strong> more aggressive combos, summoned minions, or arena hazards</li>
+    <li><strong>Phase 3:</strong> enraged final stretch with faster movement and high-risk attacks</li>
+  </ul>
+  <p>
+    The battle should deliver a strong payoff to the game's central promise: after surviving the arena, the player earns freedom by defeating the system's strongest enforcer.
+  </p>
+
+  <h2>11. Level and Arena Structure</h2>
+  <p>
+    The world structure should stay compact. Rather than building a large explorable world, the game can focus on a short prison introduction and a vertical arena ascent. This supports the team's scope while reinforcing progression.
+  </p>
+  <ul>
+    <li>Dungeon corridor or cell block for the opening escape</li>
+    <li>Arena floors or rings that feel increasingly dangerous</li>
+    <li>Small rest or upgrade moments between combat stages</li>
+    <li>Environmental hazards such as spikes, pits, fire braziers, or collapsible props if production time allows</li>
+  </ul>
+
+  <h2>12. Visual and Audio Direction</h2>
+  <p>
+    The visual style should remain 3D low poly with simple, readable silhouettes. That simplicity can still feel strong if the team emphasizes clear color language, enemy shape contrast, and a gritty arena atmosphere.
+  </p>
+  <ul>
+    <li>Dungeon spaces should feel cold, dirty, and oppressive</li>
+    <li>The arena should feel theatrical, violent, and intimidating</li>
+    <li>Warm firelight and magical glow can contrast against dark stone environments</li>
+    <li>Weapons should have strong silhouettes so players can identify them instantly</li>
+  </ul>
+  <p>
+    Audio should reinforce impact and survival pressure. Metal clanks, chain rattles, crowd-like ambience, goblin vocalizations, and heavy hit sounds can do a lot of work even with a simple art style.
+  </p>
+
+  <h2>13. UI and Feedback</h2>
+  <p>
+    The HUD should stay minimal and readable. The player should always understand their health, current wave, and temporary build state without the screen becoming crowded.
+  </p>
+  <ul>
+    <li>Health bar</li>
+    <li>Wave or floor indicator</li>
+    <li>Current weapon or spell state</li>
+    <li>Upgrade choice screen between milestones</li>
+    <li>Clear damage, hit, and enemy telegraph feedback</li>
+  </ul>
+
+  <h2>14. MVP Scope Recommendation</h2>
+  <p>
+    To keep production realistic, the first playable version should focus on a narrow but polished slice:
+  </p>
+  <ul>
+    <li>One prison intro sequence</li>
+    <li>One arena map with vertical progression</li>
+    <li>Three normal enemy types</li>
+    <li>One final boss</li>
+    <li>One signature chain weapon plus one or two pickup weapons</li>
+    <li>A small set of sorcery upgrades</li>
+    <li>Win, lose, restart, and basic progression flow</li>
+  </ul>
+
+  <h2>15. Stretch Goals</h2>
+  <ul>
+    <li>More bosses or alternate final encounters</li>
+    <li>Additional arenas with unique themes</li>
+    <li>Meta-progression between runs</li>
+    <li>More chain upgrade branches</li>
+    <li>Lore pickups or environmental storytelling</li>
+    <li>Extra weapon classes and elite enemy variants</li>
+  </ul>
+
+  <h2>16. Development Notes</h2>
+  <p>
+    The game's strongest identity comes from its opening premise and signature weapon. Because of that, the chain should receive the most design attention. If the team keeps the chain, arena climb, and final boss satisfying, the project can make a strong impression even with modest scope.
+  </p>
+  <p>
+    In short, <em>Chains and Sorcery</em> should feel like a compact dark fantasy power climb: escape captivity, survive spectacle-driven violence, master improvised weapons and magic, and fight your way to freedom.
+  </p>
+</body>
+</html>

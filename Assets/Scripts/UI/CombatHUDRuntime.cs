@@ -1,34 +1,61 @@
 using System;
 using System.Collections;
+using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.Rendering;
 using UnityEngine.UI;
 using UnityEngine.XR.Interaction.Toolkit.UI;
 
 namespace VRCombat.UI
 {
+    public readonly struct CombatHudUpgradeChoice
+    {
+        public CombatHudUpgradeChoice(string title, string description, string artResourcePath)
+        {
+            Title = title;
+            Description = description;
+            ArtResourcePath = artResourcePath;
+        }
+
+        public string Title { get; }
+        public string Description { get; }
+        public string ArtResourcePath { get; }
+    }
+
     [DisallowMultipleComponent]
     public class CombatHUDRuntime : MonoBehaviour
     {
         Text m_HealthText;
         Text m_WaveText;
+        Text m_XpText;
+        Text m_SelectedSpellText;
         Text m_BannerText;
         GameObject m_DeathPanel;
         Text m_DeathText;
         Button m_RestartButton;
         GameObject m_PausePanel;
+        GameObject m_UpgradePanel;
         Slider m_MovementVignetteSlider;
         Text m_MovementVignetteValueText;
         Button m_MenuResumeButton;
         Button m_MenuRestartButton;
         Button m_MenuQuitButton;
+        readonly Button[] m_UpgradeButtons = new Button[3];
+        readonly Image[] m_UpgradeArtImages = new Image[3];
+        readonly Text[] m_UpgradeTitleTexts = new Text[3];
+        readonly Text[] m_UpgradeDescriptionTexts = new Text[3];
         Image m_FadeOverlay;
         Coroutine m_BannerRoutine;
         Coroutine m_FadeRoutine;
+        Coroutine m_UpgradeUnlockRoutine;
         Camera m_ViewCamera;
         Transform m_ViewTransform;
         Transform m_CanvasTransform;
+        readonly Dictionary<int, Material> m_AlwaysOnTopMaterialCache = new Dictionary<int, Material>();
         Action<float> m_OnMovementVignetteChanged;
         Action m_OnResumeRequested;
+        Action<int> m_OnUpgradeSelected;
+        float m_UpgradeButtonsUnlockAtRealtime;
 
         [SerializeField]
         float m_HudDistance = 1.05f;
@@ -38,6 +65,9 @@ namespace VRCombat.UI
 
         [SerializeField]
         float m_HudScale = 0.00145f;
+
+        [SerializeField]
+        float m_UpgradeSelectionArmDelaySeconds = 0.45f;
 
         public bool IsPauseMenuVisible => m_PausePanel != null && m_PausePanel.activeSelf;
 
@@ -97,6 +127,24 @@ namespace VRCombat.UI
             m_WaveText.text = $"Wave {currentWave} | Remaining: {enemiesRemaining} | Flow: {flowRate:0.00}/s";
         }
 
+        public void SetXpInfo(int level, int currentXp, int nextLevelXp)
+        {
+            if (m_XpText == null)
+                return;
+
+            m_XpText.text = $"Level {level} | XP: {currentXp}/{nextLevelXp}";
+        }
+
+        public void SetSelectedSpell(string selectedSpellText)
+        {
+            if (m_SelectedSpellText == null)
+                return;
+
+            m_SelectedSpellText.text = string.IsNullOrWhiteSpace(selectedSpellText)
+                ? "Spell: None"
+                : selectedSpellText;
+        }
+
         public void ShowBanner(string message, float seconds)
         {
             if (m_BannerText == null)
@@ -129,6 +177,58 @@ namespace VRCombat.UI
                 return;
 
             m_PausePanel.SetActive(visible);
+        }
+
+        public void ShowUpgradeChoices(CombatHudUpgradeChoice[] choices, Action<int> onSelected)
+        {
+            if (m_UpgradePanel == null || choices == null || choices.Length == 0)
+                return;
+
+            if (m_UpgradeUnlockRoutine != null)
+            {
+                StopCoroutine(m_UpgradeUnlockRoutine);
+                m_UpgradeUnlockRoutine = null;
+            }
+
+            m_OnUpgradeSelected = onSelected;
+            m_UpgradePanel.SetActive(true);
+            m_UpgradeButtonsUnlockAtRealtime = Time.realtimeSinceStartup + Mathf.Max(0f, m_UpgradeSelectionArmDelaySeconds);
+
+            for (var i = 0; i < m_UpgradeButtons.Length; i++)
+            {
+                var isActive = i < choices.Length;
+                if (m_UpgradeButtons[i] != null)
+                {
+                    m_UpgradeButtons[i].gameObject.SetActive(isActive);
+                    m_UpgradeButtons[i].interactable = false;
+                }
+
+                if (!isActive)
+                    continue;
+
+                var choice = choices[i];
+                if (m_UpgradeTitleTexts[i] != null)
+                    m_UpgradeTitleTexts[i].text = choice.Title;
+                if (m_UpgradeDescriptionTexts[i] != null)
+                    m_UpgradeDescriptionTexts[i].text = choice.Description;
+                if (m_UpgradeArtImages[i] != null)
+                    m_UpgradeArtImages[i].sprite = LoadSprite(choice.ArtResourcePath);
+            }
+
+            m_UpgradeUnlockRoutine = StartCoroutine(EnableUpgradeButtonsAfterDelayRealtime(choices.Length));
+        }
+
+        public void HideUpgradeChoices()
+        {
+            if (m_UpgradeUnlockRoutine != null)
+            {
+                StopCoroutine(m_UpgradeUnlockRoutine);
+                m_UpgradeUnlockRoutine = null;
+            }
+
+            m_OnUpgradeSelected = null;
+            if (m_UpgradePanel != null)
+                m_UpgradePanel.SetActive(false);
         }
 
         public void SetMovementVignetteStrength(float value, bool notify)
@@ -177,11 +277,18 @@ namespace VRCombat.UI
                 m_FadeRoutine = null;
             }
 
+            if (m_UpgradeUnlockRoutine != null)
+            {
+                StopCoroutine(m_UpgradeUnlockRoutine);
+                m_UpgradeUnlockRoutine = null;
+            }
+
             if (m_BannerText != null)
                 m_BannerText.enabled = false;
 
             HideDeathPanel();
             SetPauseMenuVisible(false);
+            HideUpgradeChoices();
             SetFadeOverlayAlpha(0f);
         }
 
@@ -209,6 +316,21 @@ namespace VRCombat.UI
             m_FadeRoutine = null;
         }
 
+        IEnumerator EnableUpgradeButtonsAfterDelayRealtime(int choiceCount)
+        {
+            var remainingDelay = Mathf.Max(0f, m_UpgradeButtonsUnlockAtRealtime - Time.realtimeSinceStartup);
+            if (remainingDelay > 0f)
+                yield return new WaitForSecondsRealtime(remainingDelay);
+
+            for (var i = 0; i < m_UpgradeButtons.Length; i++)
+            {
+                if (m_UpgradeButtons[i] != null && i < choiceCount && m_UpgradeButtons[i].gameObject.activeSelf)
+                    m_UpgradeButtons[i].interactable = true;
+            }
+
+            m_UpgradeUnlockRoutine = null;
+        }
+
         void BuildUi(Action restartAction, Action quitAction)
         {
             var font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
@@ -220,6 +342,7 @@ namespace VRCombat.UI
             var canvas = canvasObject.AddComponent<Canvas>();
             canvas.renderMode = RenderMode.WorldSpace;
             canvas.worldCamera = m_ViewCamera;
+            canvas.overrideSorting = true;
             canvas.sortingOrder = 200;
 
             var scaler = canvasObject.AddComponent<CanvasScaler>();
@@ -230,7 +353,7 @@ namespace VRCombat.UI
             canvasObject.AddComponent<TrackedDeviceGraphicRaycaster>();
 
             var canvasRect = canvas.GetComponent<RectTransform>();
-            canvasRect.sizeDelta = new Vector2(1400f, 700f);
+            canvasRect.sizeDelta = new Vector2(1400f, 760f);
             m_CanvasTransform = canvasObject.transform;
             m_CanvasTransform.localScale = Vector3.one * m_HudScale;
             LateUpdate();
@@ -250,6 +373,22 @@ namespace VRCombat.UI
             waveRect.pivot = new Vector2(0.5f, 1f);
             waveRect.anchoredPosition = new Vector2(260f, -20f);
             waveRect.sizeDelta = new Vector2(780f, 70f);
+
+            m_XpText = CreateText("XpText", canvasObject.transform, font, 28, TextAnchor.UpperLeft);
+            var xpRect = m_XpText.rectTransform;
+            xpRect.anchorMin = new Vector2(0.5f, 1f);
+            xpRect.anchorMax = new Vector2(0.5f, 1f);
+            xpRect.pivot = new Vector2(0.5f, 1f);
+            xpRect.anchoredPosition = new Vector2(-250f, -72f);
+            xpRect.sizeDelta = new Vector2(500f, 54f);
+
+            m_SelectedSpellText = CreateText("SelectedSpellText", canvasObject.transform, font, 28, TextAnchor.UpperLeft);
+            var selectedSpellRect = m_SelectedSpellText.rectTransform;
+            selectedSpellRect.anchorMin = new Vector2(0.5f, 1f);
+            selectedSpellRect.anchorMax = new Vector2(0.5f, 1f);
+            selectedSpellRect.pivot = new Vector2(0.5f, 1f);
+            selectedSpellRect.anchoredPosition = new Vector2(260f, -72f);
+            selectedSpellRect.sizeDelta = new Vector2(780f, 54f);
 
             m_BannerText = CreateText("BannerText", canvasObject.transform, font, 52, TextAnchor.MiddleCenter);
             m_BannerText.enabled = false;
@@ -317,10 +456,10 @@ namespace VRCombat.UI
             m_PausePanel = new GameObject("PausePanel", typeof(RectTransform), typeof(Image));
             m_PausePanel.transform.SetParent(canvasObject.transform, false);
             var pausePanelRect = m_PausePanel.GetComponent<RectTransform>();
-            pausePanelRect.anchorMin = new Vector2(0.5f, 0.5f);
-            pausePanelRect.anchorMax = new Vector2(0.5f, 0.5f);
-            pausePanelRect.pivot = new Vector2(0.5f, 0.5f);
-            pausePanelRect.sizeDelta = new Vector2(760f, 460f);
+            pausePanelRect.anchorMin = Vector2.zero;
+            pausePanelRect.anchorMax = Vector2.one;
+            pausePanelRect.offsetMin = Vector2.zero;
+            pausePanelRect.offsetMax = Vector2.zero;
 
             var pausePanelImage = m_PausePanel.GetComponent<Image>();
             pausePanelImage.color = new Color(0f, 0f, 0f, 0.88f);
@@ -441,8 +580,12 @@ namespace VRCombat.UI
                 new Color(0.18f, 0.22f, 0.26f, 0.96f));
             m_MenuQuitButton.onClick.AddListener(() => quitAction?.Invoke());
 
+            BuildUpgradePanel(canvasObject.transform, font);
+            ApplyAlwaysOnTopMaterials(canvasObject.transform, font);
+
             m_DeathPanel.SetActive(false);
             m_PausePanel.SetActive(false);
+            m_UpgradePanel.SetActive(false);
         }
 
         void RefreshCanvasCamera()
@@ -455,6 +598,71 @@ namespace VRCombat.UI
                 return;
 
             canvas.worldCamera = m_ViewCamera;
+        }
+
+        void ApplyAlwaysOnTopMaterials(Transform root, Font font)
+        {
+            if (root == null)
+                return;
+
+            var graphics = root.GetComponentsInChildren<Graphic>(true);
+            for (var i = 0; i < graphics.Length; i++)
+            {
+                var graphic = graphics[i];
+                if (graphic == null)
+                    continue;
+
+                var sourceMaterial = graphic.material;
+                if (graphic is Text textGraphic)
+                {
+                    sourceMaterial = textGraphic.material != null
+                        ? textGraphic.material
+                        : textGraphic.font != null
+                            ? textGraphic.font.material
+                            : font != null ? font.material : null;
+                }
+
+                var alwaysOnTopMaterial = GetOrCreateAlwaysOnTopMaterial(sourceMaterial, graphic is Text);
+                if (alwaysOnTopMaterial == null)
+                    continue;
+
+                if (graphic is Text text)
+                    text.material = alwaysOnTopMaterial;
+                else
+                    graphic.material = alwaysOnTopMaterial;
+            }
+        }
+
+        Material GetOrCreateAlwaysOnTopMaterial(Material sourceMaterial, bool isText)
+        {
+            if (sourceMaterial == null)
+            {
+                var fallbackShader = Shader.Find("UI/Default") ?? Shader.Find("Sprites/Default");
+                if (fallbackShader == null)
+                    return null;
+
+                sourceMaterial = new Material(fallbackShader)
+                {
+                    name = isText ? "Runtime HUD Text Base" : "Runtime HUD Graphic Base"
+                };
+            }
+
+            var cacheKey = sourceMaterial.GetInstanceID();
+            if (m_AlwaysOnTopMaterialCache.TryGetValue(cacheKey, out var cachedMaterial) && cachedMaterial != null)
+                return cachedMaterial;
+
+            var material = new Material(sourceMaterial)
+            {
+                name = $"{sourceMaterial.name} AlwaysOnTop",
+                renderQueue = 4000
+            };
+            if (material.HasProperty("_ZTest"))
+                material.SetInt("_ZTest", (int)CompareFunction.Always);
+            else
+                material.SetInt("_ZTest", (int)CompareFunction.Always);
+
+            m_AlwaysOnTopMaterialCache[cacheKey] = material;
+            return material;
         }
 
         void SetFadeOverlayAlpha(float alpha)
@@ -517,6 +725,104 @@ namespace VRCombat.UI
             buttonTextRect.offsetMax = Vector2.zero;
 
             return button;
+        }
+
+        void BuildUpgradePanel(Transform parent, Font font)
+        {
+            m_UpgradePanel = new GameObject("UpgradePanel", typeof(RectTransform), typeof(Image));
+            m_UpgradePanel.transform.SetParent(parent, false);
+            var panelRect = m_UpgradePanel.GetComponent<RectTransform>();
+            panelRect.anchorMin = Vector2.zero;
+            panelRect.anchorMax = Vector2.one;
+            panelRect.offsetMin = Vector2.zero;
+            panelRect.offsetMax = Vector2.zero;
+
+            var panelImage = m_UpgradePanel.GetComponent<Image>();
+            panelImage.color = new Color(0.02f, 0.02f, 0.02f, 0.94f);
+
+            var titleText = CreateText("UpgradePanelTitle", m_UpgradePanel.transform, font, 54, TextAnchor.MiddleCenter);
+            titleText.text = "Choose an Upgrade";
+            var titleRect = titleText.rectTransform;
+            titleRect.anchorMin = new Vector2(0.5f, 0.85f);
+            titleRect.anchorMax = new Vector2(0.5f, 0.85f);
+            titleRect.pivot = new Vector2(0.5f, 0.5f);
+            titleRect.sizeDelta = new Vector2(900f, 80f);
+
+            for (var i = 0; i < m_UpgradeButtons.Length; i++)
+            {
+                var buttonObject = new GameObject($"UpgradeChoice{i + 1}", typeof(RectTransform), typeof(Image), typeof(Button));
+                buttonObject.transform.SetParent(m_UpgradePanel.transform, false);
+
+                var buttonRect = buttonObject.GetComponent<RectTransform>();
+                buttonRect.anchorMin = new Vector2(0.5f, 0.45f);
+                buttonRect.anchorMax = new Vector2(0.5f, 0.45f);
+                buttonRect.pivot = new Vector2(0.5f, 0.5f);
+                buttonRect.sizeDelta = new Vector2(320f, 460f);
+                buttonRect.anchoredPosition = new Vector2((i - 1) * 350f, 0f);
+
+                var buttonImage = buttonObject.GetComponent<Image>();
+                buttonImage.color = new Color(0.08f, 0.08f, 0.08f, 0.06f);
+
+                var button = buttonObject.GetComponent<Button>();
+                var capturedIndex = i;
+                button.onClick.AddListener(() =>
+                {
+                    if (Time.realtimeSinceStartup < m_UpgradeButtonsUnlockAtRealtime)
+                        return;
+
+                    m_OnUpgradeSelected?.Invoke(capturedIndex);
+                });
+                button.targetGraphic = buttonImage;
+                m_UpgradeButtons[i] = button;
+
+                var artObject = new GameObject($"UpgradeArt{i + 1}", typeof(RectTransform), typeof(Image));
+                artObject.transform.SetParent(buttonObject.transform, false);
+                var artRect = artObject.GetComponent<RectTransform>();
+                artRect.anchorMin = new Vector2(0.5f, 0.5f);
+                artRect.anchorMax = new Vector2(0.5f, 0.5f);
+                artRect.pivot = new Vector2(0.5f, 0.5f);
+                artRect.anchoredPosition = Vector2.zero;
+                artRect.sizeDelta = new Vector2(320f, 460f);
+                var artImage = artObject.GetComponent<Image>();
+                artImage.preserveAspect = false;
+                artImage.raycastTarget = false;
+                artObject.transform.localScale = new Vector3(2f, 1f, 1f);
+                m_UpgradeArtImages[i] = artImage;
+
+                var choiceTitle = CreateText($"UpgradeTitle{i + 1}", buttonObject.transform, font, 32, TextAnchor.UpperCenter);
+                var choiceTitleRect = choiceTitle.rectTransform;
+                choiceTitleRect.anchorMin = new Vector2(0.5f, 0f);
+                choiceTitleRect.anchorMax = new Vector2(0.5f, 0f);
+                choiceTitleRect.pivot = new Vector2(0.5f, 0f);
+                choiceTitleRect.anchoredPosition = new Vector2(0f, 120f);
+                choiceTitleRect.sizeDelta = new Vector2(470f, 56f);
+                m_UpgradeTitleTexts[i] = choiceTitle;
+
+                var descriptionText = CreateText($"UpgradeDescription{i + 1}", buttonObject.transform, font, 22, TextAnchor.UpperCenter);
+                var descriptionRect = descriptionText.rectTransform;
+                descriptionRect.anchorMin = new Vector2(0.5f, 0f);
+                descriptionRect.anchorMax = new Vector2(0.5f, 0f);
+                descriptionRect.pivot = new Vector2(0.5f, 0f);
+                descriptionRect.anchoredPosition = new Vector2(0f, 28f);
+                descriptionRect.sizeDelta = new Vector2(470f, 84f);
+                m_UpgradeDescriptionTexts[i] = descriptionText;
+            }
+        }
+
+        static Sprite LoadSprite(string resourcePath)
+        {
+            if (string.IsNullOrWhiteSpace(resourcePath))
+                return null;
+
+            var texture = Resources.Load<Texture2D>(resourcePath);
+            if (texture == null)
+                return null;
+
+            return Sprite.Create(
+                texture,
+                new Rect(0f, 0f, texture.width, texture.height),
+                new Vector2(0.5f, 0.5f),
+                100f);
         }
     }
 }
