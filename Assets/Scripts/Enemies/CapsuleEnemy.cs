@@ -146,6 +146,13 @@ namespace VRCombat.Enemies
         Material[] m_RuntimeMaterials;
         ParticleSystem m_SplatterParticles;
         float m_CurrentHealth;
+        float m_BaseMoveSpeed;
+        float m_SlowMultiplier = 1f;
+        float m_SlowUntilTime = -100f;
+        float m_BurnDamagePerSecond;
+        float m_BurnUntilTime = -100f;
+        float m_NextBurnTickTime = -100f;
+        GameObject m_BurnSource;
         bool m_IsGrabbed;
         float m_ResumeChaseAtTime;
         float m_LastPlayerContactTime = -100f;
@@ -240,6 +247,7 @@ namespace VRCombat.Enemies
                     m_MoveSpeed *= 1.6f;
                     break;
             }
+            m_BaseMoveSpeed = m_MoveSpeed;
             m_CurrentHealth = m_MaxHealth;
             UpdateColor();
         }
@@ -247,6 +255,7 @@ namespace VRCombat.Enemies
         void Awake()
         {
             m_CurrentHealth = m_MaxHealth;
+            m_BaseMoveSpeed = m_MoveSpeed;
             m_Rigidbody = GetComponent<Rigidbody>();
             m_CapsuleCollider = GetComponent<CapsuleCollider>();
             m_GrabInteractable = GetComponent<XRGrabInteractable>();
@@ -310,6 +319,7 @@ namespace VRCombat.Enemies
 
         void Update()
         {
+            UpdateStatusEffects();
             UpdateColor();
         }
 
@@ -357,7 +367,7 @@ namespace VRCombat.Enemies
 
             if (m_IsCharging)
             {
-                m_Rigidbody.MovePosition(m_Rigidbody.position + m_ChargeDirection * (m_MoveSpeed * 3f * Time.fixedDeltaTime));
+                m_Rigidbody.MovePosition(m_Rigidbody.position + m_ChargeDirection * (GetEffectiveMoveSpeed() * 3f * Time.fixedDeltaTime));
                 if (m_ChargeDirection.sqrMagnitude > 0.001f)
                 {
                     var targetRot = Quaternion.LookRotation(m_ChargeDirection, Vector3.up);
@@ -382,7 +392,7 @@ namespace VRCombat.Enemies
 
             var desiredDirection = toTarget.normalized;
             var moveDirection = CalculateMoveDirection(currentPosition, desiredDirection);
-            var step = moveDirection * (m_MoveSpeed * Time.fixedDeltaTime);
+            var step = moveDirection * (GetEffectiveMoveSpeed() * Time.fixedDeltaTime);
             m_Rigidbody.MovePosition(currentPosition + step);
 
             if (moveDirection.sqrMagnitude > 0.001f)
@@ -785,6 +795,30 @@ namespace VRCombat.Enemies
                 SetMaterialColor(m_RuntimeMaterials[0], finalColor);
         }
 
+        void UpdateStatusEffects()
+        {
+            if (m_IsDying)
+                return;
+
+            if (Time.time > m_SlowUntilTime)
+                m_SlowMultiplier = 1f;
+
+            if (Time.time > m_BurnUntilTime || m_BurnDamagePerSecond <= 0f)
+                return;
+
+            if (Time.time < m_NextBurnTickTime)
+                return;
+
+            var tickInterval = 0.25f;
+            m_NextBurnTickTime = Time.time + tickInterval;
+            ApplyDamage(m_BurnDamagePerSecond * tickInterval, transform.position + Vector3.up * 0.85f, m_BurnSource);
+        }
+
+        float GetEffectiveMoveSpeed()
+        {
+            return Mathf.Max(0.01f, m_BaseMoveSpeed * Mathf.Clamp(m_SlowMultiplier, 0.15f, 1f));
+        }
+
         void SetupSplatterParticles()
         {
             var splatterObject = new GameObject("Blood Splatter");
@@ -1000,8 +1034,28 @@ namespace VRCombat.Enemies
         }
         GoblinAnimationDriver m_AnimationDriver;
 
-        public void ApplySlow(float speedMultiplier, float durationSeconds, GameObject source) {}
-        public void ApplyBurn(float damagePerSecond, float durationSeconds, GameObject source) {}
+        public void ApplySlow(float speedMultiplier, float durationSeconds, GameObject source)
+        {
+            if (m_IsDying || durationSeconds <= 0f)
+                return;
+
+            m_SlowMultiplier = Mathf.Min(m_SlowMultiplier, Mathf.Clamp(speedMultiplier, 0.1f, 1f));
+            m_SlowUntilTime = Mathf.Max(m_SlowUntilTime, Time.time + durationSeconds);
+            m_ResumeChaseAtTime = Mathf.Min(m_ResumeChaseAtTime, Time.time);
+        }
+
+        public void ApplyBurn(float damagePerSecond, float durationSeconds, GameObject source)
+        {
+            if (m_IsDying || damagePerSecond <= 0f || durationSeconds <= 0f)
+                return;
+
+            m_BurnDamagePerSecond = Mathf.Max(m_BurnDamagePerSecond, damagePerSecond);
+            m_BurnUntilTime = Mathf.Max(m_BurnUntilTime, Time.time + durationSeconds);
+            m_NextBurnTickTime = Mathf.Min(
+                m_NextBurnTickTime < 0f ? float.PositiveInfinity : m_NextBurnTickTime,
+                Time.time + 0.05f);
+            m_BurnSource = source;
+        }
 
     }
 }

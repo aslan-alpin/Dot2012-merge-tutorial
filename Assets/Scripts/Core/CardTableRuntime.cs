@@ -14,12 +14,15 @@ namespace VRCombat.Core
         const string CardSocketName = "Card Socket";
         const string TableResourcePath = "CombatModels/table";
         const string CardModelResourcePath = "CombatModels/Cards";
-        const float TargetTableHeightMeters = 0.78f;
+        const string TabletopReturnZoneName = "Tabletop Return Zone";
+        const float TargetTableHeightMeters = 0.90f;
         const int ChoiceSlotCount = 2;
         const float ImportedCardScale = 0.48f;
         const float CardSurfaceOffsetMeters = 0.0015f;
-        const float MinimumCardSpacingMeters = 0.28f;
-        const float MaximumCardSpacingMeters = 0.48f;
+        const float MinimumCardSpacingMeters = 0.32f;
+        const float MaximumCardSpacingMeters = 0.58f;
+        const float TabletopReturnZoneThicknessMeters = 0.12f;
+        const float TabletopReturnZoneHorizontalPaddingMeters = 0.02f;
 
         static readonly int BaseColorShaderId = Shader.PropertyToID("_BaseColor");
         static readonly int BaseMapShaderId = Shader.PropertyToID("_BaseMap");
@@ -31,10 +34,13 @@ namespace VRCombat.Core
 
         Transform m_TableVisualRoot;
         Transform m_CardSocket;
+        Transform m_TabletopReturnZoneRoot;
         readonly List<Transform> m_CardSlots = new List<Transform>(ChoiceSlotCount);
         readonly List<GameObject> m_CurrentCardObjects = new List<GameObject>(ChoiceSlotCount);
         Material m_TableFallbackMaterial;
         Material m_CardFallbackMaterial;
+        BoxCollider m_TableCollider;
+        BoxCollider m_TabletopReturnZoneCollider;
 
         void Awake()
         {
@@ -228,6 +234,7 @@ namespace VRCombat.Core
             NormalizeVisualHeight(m_TableVisualRoot, TargetTableHeightMeters);
             CenterVisualOnFloor(m_TableVisualRoot, transform);
             EnsureTableCollider();
+            EnsureTabletopReturnZone();
 
             EnsureCardSocket();
             UpdateCardSlotLayout(Mathf.Max(1, m_CurrentCardObjects.Count));
@@ -386,12 +393,99 @@ namespace VRCombat.Core
             if (!TryGetVisualBounds(m_TableVisualRoot, transform, out var tableBounds))
                 return;
 
-            var collider = GetComponent<BoxCollider>();
-            if (collider == null)
-                collider = gameObject.AddComponent<BoxCollider>();
+            if (m_TableCollider == null)
+                m_TableCollider = GetComponent<BoxCollider>() ?? gameObject.AddComponent<BoxCollider>();
 
-            collider.center = tableBounds.center;
-            collider.size = tableBounds.size + new Vector3(0.02f, 0.01f, 0.02f);
+            m_TableCollider.center = tableBounds.center;
+            m_TableCollider.size = tableBounds.size + new Vector3(0.02f, 0.01f, 0.02f);
+            m_TableCollider.isTrigger = false;
+        }
+
+        void EnsureTabletopReturnZone()
+        {
+            if (!TryGetVisualBounds(m_TableVisualRoot, transform, out var tableBounds))
+                return;
+
+            if (m_TabletopReturnZoneRoot == null)
+            {
+                var existing = transform.Find(TabletopReturnZoneName);
+                if (existing != null)
+                    m_TabletopReturnZoneRoot = existing;
+            }
+
+            if (m_TabletopReturnZoneRoot == null)
+            {
+                var returnZoneObject = new GameObject(TabletopReturnZoneName);
+                returnZoneObject.transform.SetParent(transform, false);
+                m_TabletopReturnZoneRoot = returnZoneObject.transform;
+            }
+
+            if (m_TabletopReturnZoneCollider == null && m_TabletopReturnZoneRoot != null)
+            {
+                m_TabletopReturnZoneCollider = m_TabletopReturnZoneRoot.GetComponent<BoxCollider>();
+                if (m_TabletopReturnZoneCollider == null)
+                    m_TabletopReturnZoneCollider = m_TabletopReturnZoneRoot.gameObject.AddComponent<BoxCollider>();
+            }
+
+            if (m_TabletopReturnZoneRoot == null || m_TabletopReturnZoneCollider == null)
+                return;
+
+            var tabletopY = tableBounds.max.y + TabletopReturnZoneThicknessMeters * 0.5f;
+            m_TabletopReturnZoneRoot.localPosition = new Vector3(tableBounds.center.x, tabletopY, tableBounds.center.z);
+            m_TabletopReturnZoneRoot.localRotation = Quaternion.identity;
+
+            m_TabletopReturnZoneCollider.center = Vector3.zero;
+            m_TabletopReturnZoneCollider.size = new Vector3(
+                tableBounds.size.x + TabletopReturnZoneHorizontalPaddingMeters,
+                TabletopReturnZoneThicknessMeters,
+                tableBounds.size.z + TabletopReturnZoneHorizontalPaddingMeters);
+            m_TabletopReturnZoneCollider.isTrigger = true;
+        }
+
+        public bool IsCardReleasedOnTable(Collider cardCollider)
+        {
+            if (cardCollider == null || m_TabletopReturnZoneCollider == null)
+                return false;
+
+            if (Physics.ComputePenetration(
+                    m_TabletopReturnZoneCollider,
+                    m_TabletopReturnZoneCollider.transform.position,
+                    m_TabletopReturnZoneCollider.transform.rotation,
+                    cardCollider,
+                    cardCollider.transform.position,
+                    cardCollider.transform.rotation,
+                    out _,
+                    out _))
+            {
+                return true;
+            }
+
+            return m_TabletopReturnZoneCollider.bounds.Intersects(cardCollider.bounds);
+        }
+
+        public void ParkCardOnTable(Transform cardTransform, Collider cardCollider, Rigidbody rigidbody)
+        {
+            if (cardTransform == null)
+                return;
+
+            if (rigidbody != null)
+            {
+                rigidbody.linearVelocity = Vector3.zero;
+                rigidbody.angularVelocity = Vector3.zero;
+                rigidbody.useGravity = false;
+                rigidbody.isKinematic = true;
+                rigidbody.collisionDetectionMode = CollisionDetectionMode.ContinuousSpeculative;
+                rigidbody.interpolation = RigidbodyInterpolation.Interpolate;
+                rigidbody.Sleep();
+            }
+
+            if (cardCollider == null || m_TabletopReturnZoneCollider == null)
+                return;
+
+            var targetMinY = m_TabletopReturnZoneCollider.bounds.max.y + CardSurfaceOffsetMeters;
+            var cardBounds = cardCollider.bounds;
+            if (cardBounds.min.y < targetMinY)
+                cardTransform.position += Vector3.up * (targetMinY - cardBounds.min.y);
         }
 
         static void NormalizeVisualHeight(Transform visualRoot, float targetHeight)
@@ -704,6 +798,8 @@ namespace VRCombat.Core
         VRCombatBootstrapper m_Bootstrapper;
         Rigidbody m_Rigidbody;
         CardTableRuntime m_TableRuntime;
+        Collider m_Collider;
+        XRGrabInteractable m_Interactable;
         bool m_Consumed;
 
         public void Initialize(
@@ -718,28 +814,67 @@ namespace VRCombat.Core
             m_Bootstrapper = bootstrapper;
             m_Rigidbody = rigidbody != null ? rigidbody : GetComponent<Rigidbody>();
             m_TableRuntime = tableRuntime;
+            m_Collider = GetComponent<Collider>();
+            m_Interactable = GetComponent<XRGrabInteractable>();
 
-            var interactable = GetComponent<XRGrabInteractable>();
-            if (interactable != null)
-                interactable.selectEntered.AddListener(OnSelectEntered);
+            if (m_Interactable != null)
+            {
+                m_Interactable.selectEntered.AddListener(OnSelectEntered);
+                m_Interactable.selectExited.AddListener(OnSelectExited);
+            }
 
             if (m_Rigidbody != null)
             {
                 m_Rigidbody.isKinematic = true;
                 m_Rigidbody.useGravity = false;
+                m_Rigidbody.collisionDetectionMode = CollisionDetectionMode.ContinuousSpeculative;
+                m_Rigidbody.interpolation = RigidbodyInterpolation.Interpolate;
             }
         }
 
         void OnDestroy()
         {
-            var interactable = GetComponent<XRGrabInteractable>();
-            if (interactable != null)
-                interactable.selectEntered.RemoveListener(OnSelectEntered);
+            if (m_Interactable == null)
+                m_Interactable = GetComponent<XRGrabInteractable>();
+            if (m_Interactable != null)
+            {
+                m_Interactable.selectEntered.RemoveListener(OnSelectEntered);
+                m_Interactable.selectExited.RemoveListener(OnSelectExited);
+            }
 
             m_TableRuntime?.UnregisterCard(gameObject);
         }
 
         void OnSelectEntered(SelectEnterEventArgs args)
+        {
+            if (m_Consumed || m_CardDefinition == null || m_Bootstrapper == null)
+                return;
+
+            if (m_Rigidbody == null)
+                return;
+
+            m_Rigidbody.isKinematic = false;
+            m_Rigidbody.useGravity = false;
+            m_Rigidbody.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
+            m_Rigidbody.interpolation = RigidbodyInterpolation.Interpolate;
+            m_Rigidbody.WakeUp();
+        }
+
+        void OnSelectExited(SelectExitEventArgs args)
+        {
+            if (m_Consumed || m_CardDefinition == null || m_Bootstrapper == null)
+                return;
+
+            if (m_TableRuntime != null && m_TableRuntime.IsCardReleasedOnTable(m_Collider))
+            {
+                m_TableRuntime.ParkCardOnTable(transform, m_Collider, m_Rigidbody);
+                return;
+            }
+
+            CommitChoice();
+        }
+
+        void CommitChoice()
         {
             if (m_Consumed || m_CardDefinition == null || m_Bootstrapper == null)
                 return;

@@ -11,7 +11,7 @@ namespace VRCombat.Combat
         const string BoneEndNameToken = "_end";
         const int ActiveTailCollisionSegments = 3;
         const int MaxSimulatedBones = 12;
-        const float HoldSettleDurationSeconds = 0.08f;
+        const float HoldSettleDurationSeconds = 0.01f;
 
         readonly List<Rigidbody> m_SegmentBodies = new List<Rigidbody>();
         readonly List<Transform> m_SimulatedBones = new List<Transform>();
@@ -72,7 +72,8 @@ namespace VRCombat.Combat
             m_SegmentColliders.Clear();
             m_SegmentJoints.Clear();
 
-            var simulatedBones = LimitSampledBones(chainBones, MaxSimulatedBones);
+            var sampledBones = SampleChainBones(chainBones, boneStep);
+            var simulatedBones = LimitSampledBones(sampledBones, MaxSimulatedBones);
             if (simulatedBones.Count < 3)
             {
                 Debug.LogWarning($"{nameof(RiggedChainWeapon)} on {name} does not have enough sampled bones to simulate.");
@@ -176,8 +177,8 @@ namespace VRCombat.Combat
             if (Time.time < m_SettleUntilTime)
                 ApplySettleDamping();
 
-            var maxLinearVelocity = m_IsHeld ? 80f : 80f;
-            var maxAngularVelocity = 120f;
+            var maxLinearVelocity = m_IsHeld ? 220f : 80f;
+            var maxAngularVelocity = m_IsHeld ? 320f : 120f;
             for (var i = 0; i < m_SegmentBodies.Count; i++)
             {
                 var body = m_SegmentBodies[i];
@@ -327,7 +328,7 @@ namespace VRCombat.Combat
             body.angularDamping = isTip ? 0.04f : 0.08f;
             body.solverIterations = 36;
             body.solverVelocityIterations = 14;
-            body.maxAngularVelocity = 120f;
+            body.maxAngularVelocity = 320f;
             body.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
             body.interpolation = RigidbodyInterpolation.Interpolate;
 
@@ -365,11 +366,11 @@ namespace VRCombat.Combat
             joint.angularYMotion = ConfigurableJointMotion.Limited;
             joint.angularZMotion = ConfigurableJointMotion.Limited;
             joint.projectionMode = JointProjectionMode.PositionAndRotation;
-            joint.enablePreprocessing = true;
+            joint.enablePreprocessing = false;
             joint.breakForce = float.PositiveInfinity;
             joint.breakTorque = float.PositiveInfinity;
-            joint.massScale = 1.5f;
-            joint.connectedMassScale = 1.5f;
+            joint.massScale = 1f;
+            joint.connectedMassScale = 1f;
             joint.rotationDriveMode = RotationDriveMode.Slerp;
 
             var drive = new JointDrive
@@ -537,12 +538,12 @@ namespace VRCombat.Combat
                 body.isKinematic = !enabled;
                 body.useGravity = enabled;
                 body.linearDamping = enabled
-                    ? held ? (i >= m_SegmentBodies.Count - 2 ? 0.05f : 0.09f) : (i >= m_SegmentBodies.Count - 1 ? 0.12f : 0.18f)
+                    ? held ? (i >= m_SegmentBodies.Count - 2 ? 0.002f : 0.006f) : (i >= m_SegmentBodies.Count - 1 ? 0.09f : 0.14f)
                     : 1.6f;
                 body.angularDamping = enabled
-                    ? held ? (i >= m_SegmentBodies.Count - 2 ? 0.04f : 0.08f) : (i >= m_SegmentBodies.Count - 1 ? 0.1f : 0.16f)
+                    ? held ? (i >= m_SegmentBodies.Count - 2 ? 0.003f : 0.008f) : (i >= m_SegmentBodies.Count - 1 ? 0.08f : 0.12f)
                     : 1.75f;
-                body.maxAngularVelocity = 120f;
+                body.maxAngularVelocity = held ? 320f : 140f;
                 body.collisionDetectionMode = enabled
                     ? CollisionDetectionMode.ContinuousDynamic
                     : CollisionDetectionMode.ContinuousSpeculative;
@@ -576,11 +577,11 @@ namespace VRCombat.Combat
 
                 var baseSpring = i == 0 ? m_RootSpring : m_SegmentSpring;
                 var angularLimit = held
-                    ? (i == 0 ? 100f : 140f)
-                    : (i == 0 ? 90f : 120f);
+                    ? (i == 0 ? 155f : 175f)
+                    : (i == 0 ? 100f : 135f);
                 var drive = joint.slerpDrive;
-                drive.positionSpring = held ? baseSpring * 0.55f : baseSpring * 0.05f;
-                drive.positionDamper = held ? Mathf.Max(0.1f, m_JointDamper * 0.75f) : Mathf.Max(0.1f, m_JointDamper * 0.7f);
+                drive.positionSpring = held ? baseSpring * 1.45f : baseSpring * 0.04f;
+                drive.positionDamper = held ? Mathf.Max(0.03f, m_JointDamper * 0.08f) : Mathf.Max(0.05f, m_JointDamper * 0.35f);
                 drive.maximumForce = float.MaxValue;
                 joint.slerpDrive = drive;
                 joint.lowAngularXLimit = new SoftJointLimit { limit = -angularLimit };
@@ -598,8 +599,8 @@ namespace VRCombat.Combat
                 if (body == null)
                     continue;
 
-                body.linearVelocity *= 0.85f;
-                body.angularVelocity *= 0.82f;
+                body.linearVelocity *= 0.98f;
+                body.angularVelocity *= 0.97f;
             }
         }
     }

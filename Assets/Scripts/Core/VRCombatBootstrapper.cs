@@ -19,6 +19,7 @@ using UnityEngine.XR.Interaction.Toolkit.Locomotion.Teleportation;
 using UnityEngine.InputSystem;
 using VRCombat.Combat;
 using VRCombat.Enemies;
+using VRCombat.Environment;
 using VRCombat.Player;
 using VRCombat.UI;
 using XRCommonUsages = UnityEngine.XR.CommonUsages;
@@ -172,7 +173,11 @@ namespace VRCombat.Core
         RunProgressionController m_RunProgressionController;
         PlayerSpellLoadout m_PlayerSpellLoadout;
         WristChainIntroController m_WristChainIntroController;
+        [SerializeField] ArenaOpeningEncounter m_IntroOpeningEncounter;
+        readonly List<ArenaOpeningEncounter> m_ArenaEncounters = new List<ArenaOpeningEncounter>();
+        readonly Dictionary<int, ArenaOpeningEncounter> m_WaveUnlockEncounters = new Dictionary<int, ArenaOpeningEncounter>();
         readonly List<CapsuleEnemy> m_ActiveWaveEnemies = new List<CapsuleEnemy>();
+        readonly Dictionary<CapsuleEnemy, float> m_EnemyKillZoneGraceUntil = new Dictionary<CapsuleEnemy, float>();
         readonly List<GameObject> m_RuntimeSpawnedObjects = new List<GameObject>();
         readonly List<CardTableRuntime> m_RuntimeCardTables = new List<CardTableRuntime>();
         readonly List<Collider> m_ArenaSurfaceColliders = new List<Collider>();
@@ -193,6 +198,8 @@ namespace VRCombat.Core
         static readonly List<XRInputDevice> s_ControllerDeviceBuffer = new List<XRInputDevice>(4);
         static readonly RaycastHit[] s_ScenePickupSupportHits = new RaycastHit[16];
         static readonly RaycastHit[] s_PlayerGroundHitBuffer = new RaycastHit[16];
+        static readonly RaycastHit[] s_ArenaSurfaceHitBuffer = new RaycastHit[24];
+        static readonly Collider[] s_SpawnClearanceBuffer = new Collider[24];
         Coroutine m_DeathFlowRoutine;
         Vector3 m_KillZoneCenter;
         bool m_HasKillZoneCenter;
@@ -206,13 +213,16 @@ namespace VRCombat.Core
         int m_CurrentWave = 1;
         int m_HitsTakenThisWave;
         float m_CurrentFlowRate;
+        int m_DeferredNextWave = -1;
         bool m_IsGameOver;
         bool m_IsRestarting;
+        bool m_IsWaitingForEncounterResume;
         bool m_IsPauseMenuOpen;
         bool m_HasLoggedPauseStartupDiagnostics;
         bool m_HasLoggedFirstPauseAttempt;
         bool m_HasLoggedCameraRecoveryAttempt;
         bool m_RunStarted;
+        bool m_HasStartedWaveLoop;
         bool m_LastUpgradeSelectionActive;
         bool m_HasGrantedIntroChainWeapon;
         float m_SpawnProtectionUntilTime;
@@ -224,6 +234,8 @@ namespace VRCombat.Core
         Vector3 m_CustomRunStartPosition;
         Quaternion m_CustomRunStartRotation = Quaternion.identity;
         bool m_HasCustomRunStartPose;
+        ArenaOpeningEncounter m_PendingWaveResumeEncounter;
+        CapsuleEnemy m_MilestoneKeyCarrier;
 
         static readonly int BaseColorShaderId = Shader.PropertyToID("_BaseColor");
         static readonly int ColorShaderId = Shader.PropertyToID("_Color");
@@ -264,9 +276,9 @@ namespace VRCombat.Core
         const string ArenaRootName = "Arena";
         const string AttachPointObjectName = "Attach Point";
         const string SwordNameToken = "sword";
-        const float ChainJointRootSpring = 40f;
-        const float ChainJointSegmentSpring = 20f;
-        const float ChainJointDamper = 9f;
+        const float ChainJointRootSpring = 240f;
+        const float ChainJointSegmentSpring = 160f;
+        const float ChainJointDamper = 4f;
         const int EnemyXpReward = 25;
         static readonly Vector3 RunStartHeadPosition = new Vector3(-28.07f, 1.35f, -52.44f);
         static readonly Quaternion RunStartHeadRotation = Quaternion.identity;
@@ -288,6 +300,20 @@ namespace VRCombat.Core
         const float ArenaGroundSnapMaxStepUp = 0.75f;
         const float ArenaGroundSnapMaxStepDown = 1.6f;
         const float ArenaGroundSnapYOffset = 0.02f;
+        const float ArenaWalkableSampleInset = 0.35f;
+        const int ArenaWalkableSampleGridResolution = 11;
+        const int EnemySpawnResolutionAttempts = 14;
+        const float EnemySpawnRetryRadius = 1.9f;
+        const float EnemySpawnClearanceSkin = 0.035f;
+        const float EnemySpawnKillZoneGraceSeconds = 0.45f;
+        const float PlayerKillZoneGroundProbeHeight = 1.1f;
+        const float PlayerKillZoneGroundProbeDistance = 4.5f;
+        const float PlayerKillZoneExpansionHorizontalPadding = 4f;
+        const float PlayerKillZoneExpansionBelowPadding = 2f;
+        const float PlayerKillZoneExpansionAbovePadding = 3f;
+        const float PlayerKillZoneMaxGroundDrop = 2.5f;
+        const float PlayerKillZoneMaxGroundSlopeAngle = 75f;
+        static readonly int[] s_WaveEncounterMilestones = { 5, 10, 15 };
 
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
         static void EnsureBootstrapperExists()
@@ -348,6 +374,16 @@ namespace VRCombat.Core
         {
             if (m_RunProgressionController != null)
                 m_RunProgressionController.ProgressionChanged -= HandleRunProgressionChanged;
+
+            for (var i = 0; i < m_ArenaEncounters.Count; i++)
+            {
+                var encounter = m_ArenaEncounters[i];
+                if (encounter != null)
+                    encounter.EncounterCompleted -= HandleArenaOpeningEncounterCompleted;
+            }
+
+            if (m_MilestoneKeyCarrier != null)
+                m_MilestoneKeyCarrier.Died -= HandleMilestoneKeyCarrierDied;
 
             RestoreSuppressedHandRenderers();
             UnbindMetaMenuGestureDetector();
@@ -1230,10 +1266,29 @@ namespace VRCombat.Core
 
             var origin = m_PlayerCamera.transform.position + Vector3.up * ArenaGroundSnapProbeHeight;
             var distance = ArenaGroundSnapProbeHeight + ArenaGroundSnapDistance;
+            return TryGetArenaGroundHit(origin, distance, out bestHit);
+        }
+
+        bool TryGetArenaGroundHit(Vector3 origin, float distance, out RaycastHit bestHit)
+        {
+            return TryGetArenaGroundHit(origin, distance, m_ArenaSurfaceColliders, float.PositiveInfinity, out bestHit);
+        }
+
+        bool TryGetArenaGroundHit(
+            Vector3 origin,
+            float distance,
+            IReadOnlyList<Collider> allowedColliders,
+            float maxSurfaceY,
+            out RaycastHit bestHit)
+        {
+            bestHit = default;
+            if (allowedColliders == null || allowedColliders.Count == 0)
+                return false;
+
             var hitCount = Physics.RaycastNonAlloc(
                 origin,
                 Vector3.down,
-                s_PlayerGroundHitBuffer,
+                s_ArenaSurfaceHitBuffer,
                 distance,
                 ~0,
                 QueryTriggerInteraction.Ignore);
@@ -1241,12 +1296,11 @@ namespace VRCombat.Core
             var closestDistance = float.PositiveInfinity;
             for (var i = 0; i < hitCount; i++)
             {
-                var hit = s_PlayerGroundHitBuffer[i];
+                var hit = s_ArenaSurfaceHitBuffer[i];
                 var collider = hit.collider;
-                if (collider == null || !m_ArenaSurfaceColliders.Contains(collider))
+                if (collider == null || !ContainsCollider(allowedColliders, collider))
                     continue;
 
-                // Prevent physics boost by ignoring interactables and objects on the player
                 if (m_PlayerRoot != null && collider.transform.IsChildOf(m_PlayerRoot))
                     continue;
 
@@ -1254,6 +1308,9 @@ namespace VRCombat.Core
                     continue;
 
                 if (hit.normal.y < ArenaGroundSnapNormalThreshold)
+                    continue;
+
+                if (hit.point.y > maxSurfaceY)
                     continue;
 
                 if (hit.distance >= closestDistance)
@@ -1264,6 +1321,20 @@ namespace VRCombat.Core
             }
 
             return closestDistance < float.PositiveInfinity;
+        }
+
+        static bool ContainsCollider(IReadOnlyList<Collider> colliders, Collider candidate)
+        {
+            if (colliders == null || candidate == null)
+                return false;
+
+            for (var i = 0; i < colliders.Count; i++)
+            {
+                if (colliders[i] == candidate)
+                    return true;
+            }
+
+            return false;
         }
 
         static bool IsTrackedHandActive(InputDeviceCharacteristics handednessFlag)
@@ -2284,6 +2355,140 @@ namespace VRCombat.Core
             ApplyPlayerSpeedMultiplier();
             m_LastUpgradeSelectionActive = m_RunProgressionController.IsUpgradeSelectionActive;
             RefreshRunInteractionState();
+            ResolveArenaEncounters();
+        }
+
+        void ResolveArenaEncounters()
+        {
+            for (var i = 0; i < m_ArenaEncounters.Count; i++)
+            {
+                var encounter = m_ArenaEncounters[i];
+                if (encounter != null)
+                    encounter.EncounterCompleted -= HandleArenaOpeningEncounterCompleted;
+            }
+
+            m_ArenaEncounters.Clear();
+            m_WaveUnlockEncounters.Clear();
+
+            var seenIds = new HashSet<int>();
+            RegisterArenaEncounter(m_IntroOpeningEncounter, seenIds);
+
+            var sceneEncounters = FindObjectsByType<ArenaOpeningEncounter>(FindObjectsInactive.Include, FindObjectsSortMode.None);
+            for (var i = 0; i < sceneEncounters.Length; i++)
+                RegisterArenaEncounter(sceneEncounters[i], seenIds);
+
+            for (var i = 0; i < m_ArenaEncounters.Count; i++)
+            {
+                var encounter = m_ArenaEncounters[i];
+                if (encounter == null)
+                    continue;
+
+                encounter.EncounterCompleted += HandleArenaOpeningEncounterCompleted;
+
+                var unlockWave = encounter.UnlockAfterWave;
+                if (unlockWave <= 0)
+                    continue;
+
+                if (encounter.GateToUnlock == null)
+                {
+                    Debug.LogWarning(
+                        $"[VRCombat] Encounter '{encounter.name}' is linked to milestone wave {unlockWave}, but it has no gate assigned to unlock.",
+                        encounter);
+                }
+
+                if (m_WaveUnlockEncounters.ContainsKey(unlockWave))
+                {
+                    Debug.LogWarning(
+                        $"[VRCombat] Multiple encounters are configured for unlock wave {unlockWave}. Using the first encountered instance.",
+                        encounter);
+                    continue;
+                }
+
+                m_WaveUnlockEncounters.Add(unlockWave, encounter);
+            }
+        }
+
+        void RegisterArenaEncounter(ArenaOpeningEncounter encounter, HashSet<int> seenIds)
+        {
+            if (encounter == null)
+                return;
+
+            if (!seenIds.Add(encounter.GetInstanceID()))
+                return;
+
+            m_ArenaEncounters.Add(encounter);
+        }
+
+        static bool ShouldAutoStartEncounter(ArenaOpeningEncounter encounter)
+        {
+            return encounter != null &&
+                encounter.StartMode == EncounterStartMode.AutoOnRunStart &&
+                encounter.UnlockAfterWave <= 0;
+        }
+
+        bool HasEncounterThatStartsOrResumesWaves()
+        {
+            for (var i = 0; i < m_ArenaEncounters.Count; i++)
+            {
+                var encounter = m_ArenaEncounters[i];
+                if (encounter != null &&
+                    encounter.isActiveAndEnabled &&
+                    encounter.StartsOrResumesWavesOnCompletion)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        bool BeginAutoStartEncounters()
+        {
+            var beganAny = false;
+            for (var i = 0; i < m_ArenaEncounters.Count; i++)
+            {
+                var encounter = m_ArenaEncounters[i];
+                if (encounter == null ||
+                    !encounter.isActiveAndEnabled ||
+                    !ShouldAutoStartEncounter(encounter))
+                {
+                    continue;
+                }
+
+                encounter.BeginEncounter(this);
+                beganAny = true;
+            }
+
+            return beganAny;
+        }
+
+        bool HasPendingAutoStartEncounters()
+        {
+            for (var i = 0; i < m_ArenaEncounters.Count; i++)
+            {
+                var encounter = m_ArenaEncounters[i];
+                if (encounter == null ||
+                    !encounter.isActiveAndEnabled ||
+                    !ShouldAutoStartEncounter(encounter))
+                {
+                    continue;
+                }
+
+                if (encounter.HasBegun && !encounter.HasCompleted)
+                    return true;
+            }
+
+            return false;
+        }
+
+        void ResetAllArenaEncounters()
+        {
+            for (var i = 0; i < m_ArenaEncounters.Count; i++)
+            {
+                var encounter = m_ArenaEncounters[i];
+                if (encounter != null)
+                    encounter.ResetEncounter();
+            }
         }
 
         void HandleRunProgressionChanged()
@@ -2488,14 +2693,60 @@ namespace VRCombat.Core
             }
             if (m_SpawnLoop != null)
                 StopCoroutine(m_SpawnLoop);
-
-            m_SpawnLoop = StartCoroutine(WaveLoop());
             m_CombatHud?.ShowBanner("Chains broken", 1.1f);
             RefreshManagedLocomotionBehaviours();
             ApplyPlayerSpeedMultiplier();
             SetLocomotionEnabled(true);
             m_PlayerSpellLoadout?.SetSpellsEnabled(true);
             RefreshRunInteractionState();
+
+            ResolveArenaEncounters();
+            if (!HasEncounterThatStartsOrResumesWaves())
+            {
+                Debug.LogWarning(
+                    "[VRCombat] No encounter is configured to start or resume waves on completion. The wave loop will remain paused until one is authored.",
+                    this);
+            }
+
+            if (BeginAutoStartEncounters())
+                return;
+        }
+
+        void HandleArenaOpeningEncounterCompleted(ArenaOpeningEncounter encounter)
+        {
+            if (m_IsRestarting || m_IsGameOver || !m_RunStarted || encounter == null)
+                return;
+
+            if (!m_HasStartedWaveLoop)
+            {
+                if (encounter.StartsOrResumesWavesOnCompletion)
+                    StartWaveLoop();
+
+                return;
+            }
+
+            if (!m_IsWaitingForEncounterResume || !ReferenceEquals(encounter, m_PendingWaveResumeEncounter))
+                return;
+
+            if (!encounter.StartsOrResumesWavesOnCompletion)
+            {
+                Debug.LogWarning(
+                    $"[VRCombat] Encounter '{encounter.name}' completed while waves were paused, but StartsOrResumesWavesOnCompletion is disabled.",
+                    encounter);
+                return;
+            }
+
+            m_IsWaitingForEncounterResume = false;
+            m_PendingWaveResumeEncounter = null;
+        }
+
+        void StartWaveLoop()
+        {
+            if (m_SpawnLoop != null)
+                return;
+
+            m_HasStartedWaveLoop = true;
+            m_SpawnLoop = StartCoroutine(WaveLoop());
         }
 
         void SpawnStartingChainWeapon()
@@ -2689,9 +2940,17 @@ namespace VRCombat.Core
                 ResetSceneAuthoredObjects();
                 CapsuleEnemy.ClearRuntimeDecals();
                 m_ActiveWaveEnemies.Clear();
+                m_EnemyKillZoneGraceUntil.Clear();
                 m_NextKillZoneGlobalSweepTime = 0f;
                 m_RunStarted = false;
+                m_HasStartedWaveLoop = false;
                 m_HasGrantedIntroChainWeapon = false;
+                m_IsWaitingForEncounterResume = false;
+                m_PendingWaveResumeEncounter = null;
+                m_DeferredNextWave = -1;
+                if (m_MilestoneKeyCarrier != null)
+                    m_MilestoneKeyCarrier.Died -= HandleMilestoneKeyCarrierDied;
+                m_MilestoneKeyCarrier = null;
                 m_SpawnProtectionUntilTime = Time.unscaledTime + SpawnProtectionSeconds;
                 m_WristChainIntroController?.Cleanup();
 
@@ -2710,6 +2969,7 @@ namespace VRCombat.Core
                 SetupPauseMenuInputActions();
                 EnsureRunSystems();
                 m_RunProgressionController?.ResetRun();
+                ResetAllArenaEncounters();
                 HideLegacyArenaCenterObjects();
                 ConfigureSceneAuthoredSwordPickups();
                 ConfigureExistingGrabInteractables();
@@ -2775,8 +3035,8 @@ namespace VRCombat.Core
                 return;
 
             m_ArenaSurfaceColliders.Clear();
+            var candidateColliders = new List<Collider>();
 
-            // First, collect colliders from MeshFilters with renderers (original behavior)
             var meshFilters = arenaRoot.GetComponentsInChildren<MeshFilter>(true);
             for (var i = 0; i < meshFilters.Length; i++)
             {
@@ -2796,31 +3056,178 @@ namespace VRCombat.Core
                 meshCollider.convex = false;
                 meshCollider.isTrigger = false;
                 meshCollider.enabled = true;
-                if (!m_ArenaSurfaceColliders.Contains(meshCollider))
-                    m_ArenaSurfaceColliders.Add(meshCollider);
+                if (IsArenaWalkableCandidate(meshCollider, arenaRoot) && !candidateColliders.Contains(meshCollider))
+                    candidateColliders.Add(meshCollider);
             }
 
-            // Also collect any existing enabled non-trigger colliders under the arena
-            // This ensures floor colliders without renderers are also included
             var existingColliders = arenaRoot.GetComponentsInChildren<Collider>(true);
             for (var i = 0; i < existingColliders.Length; i++)
             {
                 var collider = existingColliders[i];
-                if (collider == null || !collider.enabled || collider.isTrigger)
+                if (!IsArenaWalkableCandidate(collider, arenaRoot) || candidateColliders.Contains(collider))
                     continue;
 
-                // Skip colliders already added
-                if (m_ArenaSurfaceColliders.Contains(collider))
-                    continue;
-
-                // Include BoxColliders, MeshColliders, and other non-trigger colliders as potential floor surfaces
-                m_ArenaSurfaceColliders.Add(collider);
+                candidateColliders.Add(collider);
             }
 
+            CollectArenaWalkableSurfaces(candidateColliders);
             TryConfigureKillZoneFromArena(arenaRoot);
 
             if (TryFindPrimaryTeleportationArea(out var teleportationArea))
                 ConfigureArenaTeleportationArea(arenaRoot, teleportationArea);
+        }
+
+        bool IsArenaWalkableCandidate(Collider collider, Transform arenaRoot)
+        {
+            if (collider == null || !collider.enabled || collider.isTrigger)
+                return false;
+
+            var colliderTransform = collider.transform;
+            if (arenaRoot != null && colliderTransform != arenaRoot && !colliderTransform.IsChildOf(arenaRoot))
+                return false;
+
+            if (colliderTransform.GetComponentInParent<XRBaseInteractable>() != null ||
+                colliderTransform.GetComponentInParent<XRGrabInteractable>() != null ||
+                colliderTransform.GetComponentInParent<TeleportationArea>() != null ||
+                colliderTransform.GetComponentInParent<GateController>() != null ||
+                colliderTransform.GetComponentInParent<Padlock>() != null ||
+                colliderTransform.GetComponentInParent<ArenaOpeningEncounter>() != null ||
+                colliderTransform.GetComponentInParent<TriggerSpawner>() != null ||
+                colliderTransform.GetComponentInParent<RuntimeKillZoneBoundary>() != null)
+            {
+                return false;
+            }
+
+            if (collider.attachedRigidbody != null && !collider.attachedRigidbody.isKinematic)
+                return false;
+
+            return !HasAnyNameToken(
+                colliderTransform,
+                "wall",
+                "gate",
+                "door",
+                "teleport",
+                "trigger",
+                "kill",
+                "boundary",
+                "spawn",
+                "encounter",
+                "padlock",
+                "lock",
+                "pillar",
+                "column",
+                "ceiling",
+                "helper");
+        }
+
+        void CollectArenaWalkableSurfaces(List<Collider> candidateColliders)
+        {
+            if (!TryGetBoundsFromColliders(candidateColliders, out var sampleBounds))
+                return;
+
+            var insetX = Mathf.Min(ArenaWalkableSampleInset, sampleBounds.extents.x * 0.45f);
+            var insetZ = Mathf.Min(ArenaWalkableSampleInset, sampleBounds.extents.z * 0.45f);
+            var sampleMinX = sampleBounds.min.x + insetX;
+            var sampleMaxX = sampleBounds.max.x - insetX;
+            var sampleMinZ = sampleBounds.min.z + insetZ;
+            var sampleMaxZ = sampleBounds.max.z - insetZ;
+            var probeY = sampleBounds.max.y + ArenaGroundSnapProbeHeight + 0.75f;
+            var probeDistance = sampleBounds.size.y + ArenaGroundSnapProbeHeight + ArenaGroundSnapDistance + 2f;
+            var floorCeilingY = sampleBounds.min.y + Mathf.Max(0.35f, ArenaTeleportFloorTopBand);
+
+            for (var xIndex = 0; xIndex < ArenaWalkableSampleGridResolution; xIndex++)
+            {
+                var tx = ArenaWalkableSampleGridResolution <= 1 ? 0.5f : xIndex / (ArenaWalkableSampleGridResolution - 1f);
+                var sampleX = Mathf.Lerp(sampleMinX, sampleMaxX, tx);
+                for (var zIndex = 0; zIndex < ArenaWalkableSampleGridResolution; zIndex++)
+                {
+                    var tz = ArenaWalkableSampleGridResolution <= 1 ? 0.5f : zIndex / (ArenaWalkableSampleGridResolution - 1f);
+                    var sampleZ = Mathf.Lerp(sampleMinZ, sampleMaxZ, tz);
+                    if (!TryGetArenaGroundHit(
+                            new Vector3(sampleX, probeY, sampleZ),
+                            probeDistance,
+                            candidateColliders,
+                            floorCeilingY,
+                            out var hit))
+                    {
+                        continue;
+                    }
+
+                    if (!m_ArenaSurfaceColliders.Contains(hit.collider))
+                        m_ArenaSurfaceColliders.Add(hit.collider);
+                }
+            }
+
+            if (m_ArenaSurfaceColliders.Count > 0)
+                return;
+
+            for (var i = 0; i < candidateColliders.Count; i++)
+            {
+                var collider = candidateColliders[i];
+                if (collider == null || collider.bounds.max.y > floorCeilingY)
+                    continue;
+
+                if (!m_ArenaSurfaceColliders.Contains(collider))
+                    m_ArenaSurfaceColliders.Add(collider);
+            }
+        }
+
+        static bool TryGetBoundsFromColliders(IReadOnlyList<Collider> colliders, out Bounds bounds)
+        {
+            bounds = default;
+            var hasBounds = false;
+            if (colliders == null)
+                return false;
+
+            for (var i = 0; i < colliders.Count; i++)
+            {
+                var collider = colliders[i];
+                if (collider == null || !collider.enabled || collider.isTrigger)
+                    continue;
+
+                if (!hasBounds)
+                {
+                    bounds = collider.bounds;
+                    hasBounds = true;
+                    continue;
+                }
+
+                bounds.Encapsulate(collider.bounds);
+            }
+
+            return hasBounds;
+        }
+
+        static bool HasAnyNameToken(Transform transformCandidate, params string[] tokens)
+        {
+            if (transformCandidate == null || tokens == null)
+                return false;
+
+            for (var i = 0; i < tokens.Length; i++)
+            {
+                var token = tokens[i];
+                if (!string.IsNullOrWhiteSpace(token) && HasNameToken(transformCandidate, token))
+                    return true;
+            }
+
+            return false;
+        }
+
+        static bool HasNameToken(Transform transformCandidate, string nameToken)
+        {
+            if (transformCandidate == null || string.IsNullOrWhiteSpace(nameToken))
+                return false;
+
+            var current = transformCandidate;
+            while (current != null)
+            {
+                if (current.name.IndexOf(nameToken, StringComparison.OrdinalIgnoreCase) >= 0)
+                    return true;
+
+                current = current.parent;
+            }
+
+            return false;
         }
 
         bool TryFindArenaRoot(out Transform arenaRoot)
@@ -2911,26 +3318,81 @@ namespace VRCombat.Core
                 return;
 
             teleportationArea.teleportationProvider = EnsureTeleportationProvider();
-            if (m_RuntimeArenaTeleportCollider != null)
-                m_RuntimeArenaTeleportCollider.enabled = false;
+            teleportationArea.colliders.RemoveAll(collider => collider == null);
+            var runtimeTeleportCollider = ConfigureRuntimeArenaTeleportCollider(arenaRoot, teleportationArea.gameObject);
+            if (runtimeTeleportCollider != null && !teleportationArea.colliders.Contains(runtimeTeleportCollider))
+                teleportationArea.colliders.Insert(0, runtimeTeleportCollider);
 
-            if (teleportationArea.colliders.Count == 0)
+            for (var i = 0; i < m_ArenaSurfaceColliders.Count; i++)
             {
-                for (var i = 0; i < m_ArenaSurfaceColliders.Count; i++)
-                {
-                    var collider = m_ArenaSurfaceColliders[i];
-                    if (collider == null || !collider.enabled || collider.isTrigger)
-                        continue;
+                var collider = m_ArenaSurfaceColliders[i];
+                if (collider == null || !collider.enabled || collider.isTrigger)
+                    continue;
 
+                if (!teleportationArea.colliders.Contains(collider))
                     teleportationArea.colliders.Add(collider);
-                }
             }
+
+            DisableTeleportHelperColliders(teleportationArea, teleportationArea.colliders);
+            IgnoreTeleportSurfaceCollisionWithPlayer(runtimeTeleportCollider);
 
             // Restrict teleport hits to walkable faces when the arena mesh includes walls.
             TrySetMemberValue(teleportationArea, "filterSelectionByHitNormal", true);
             TrySetMemberValue(teleportationArea, "m_FilterSelectionByHitNormal", true);
             TrySetMemberValue(teleportationArea, "upNormalToleranceDegrees", 45f);
             TrySetMemberValue(teleportationArea, "m_UpNormalToleranceDegrees", 45f);
+        }
+
+        static void DisableTeleportHelperColliders(TeleportationArea teleportationArea, IReadOnlyList<Collider> selectedColliders)
+        {
+            if (teleportationArea == null)
+                return;
+
+            var helperColliders = teleportationArea.GetComponentsInChildren<Collider>(true);
+            for (var i = 0; i < helperColliders.Length; i++)
+            {
+                var collider = helperColliders[i];
+                if (collider == null)
+                    continue;
+
+                if (ContainsCollider(selectedColliders, collider))
+                {
+                    collider.enabled = true;
+                    continue;
+                }
+
+                collider.enabled = false;
+            }
+        }
+
+        Collider ConfigureRuntimeArenaTeleportCollider(Transform arenaRoot, GameObject teleportAreaObject)
+        {
+            if (!TryGetArenaWorldBounds(arenaRoot, out var arenaBounds))
+                return null;
+
+            if (!(EnsureRuntimeArenaTeleportCollider(teleportAreaObject) is BoxCollider boxCollider))
+                return null;
+
+            var surfaceTransform = boxCollider.transform;
+            if (teleportAreaObject != null && surfaceTransform.parent != teleportAreaObject.transform)
+                surfaceTransform.SetParent(teleportAreaObject.transform, false);
+
+            surfaceTransform.SetPositionAndRotation(
+                new Vector3(
+                    arenaBounds.center.x,
+                    arenaBounds.min.y + ArenaTeleportSurfaceLift + ArenaTeleportSurfaceThickness * 0.5f,
+                    arenaBounds.center.z),
+                Quaternion.identity);
+            surfaceTransform.localScale = Vector3.one;
+
+            boxCollider.center = Vector3.zero;
+            boxCollider.size = new Vector3(
+                Mathf.Max(0.5f, arenaBounds.size.x * 0.94f),
+                ArenaTeleportSurfaceThickness,
+                Mathf.Max(0.5f, arenaBounds.size.z * 0.94f));
+            boxCollider.isTrigger = false;
+            boxCollider.enabled = true;
+            return boxCollider;
         }
 
         Collider EnsureRuntimeArenaTeleportCollider(GameObject teleportAreaObject)
@@ -2946,6 +3408,22 @@ namespace VRCombat.Core
             collider.enabled = false;
             m_RuntimeArenaTeleportCollider = collider;
             return collider;
+        }
+
+        void IgnoreTeleportSurfaceCollisionWithPlayer(Collider teleportCollider)
+        {
+            if (teleportCollider == null || m_PlayerRoot == null)
+                return;
+
+            var playerColliders = m_PlayerRoot.GetComponentsInChildren<Collider>(true);
+            for (var i = 0; i < playerColliders.Length; i++)
+            {
+                var playerCollider = playerColliders[i];
+                if (playerCollider == null || playerCollider == teleportCollider)
+                    continue;
+
+                Physics.IgnoreCollision(teleportCollider, playerCollider, true);
+            }
         }
 
         TeleportationProvider EnsureTeleportationProvider()
@@ -3243,9 +3721,9 @@ namespace VRCombat.Core
 
             var fallbackPositions = new[]
             {
-                startPosition + forward * 1.85f,
-                startPosition + forward * 2.45f - right * 0.95f,
-                startPosition + forward * 2.45f + right * 0.95f
+                startPosition + forward * 2.05f,
+                startPosition + forward * 2.65f - right * 1.15f,
+                startPosition + forward * 2.65f + right * 1.15f
             };
 
             for (var i = 0; i < tableCount && i < fallbackPositions.Length; i++)
@@ -3270,7 +3748,7 @@ namespace VRCombat.Core
             var startRotation = GetResolvedRunStartHeadRotation();
             var tablePosition = table.transform.position;
             var horizontalOffset = new Vector2(tablePosition.x - startPosition.x, tablePosition.z - startPosition.z);
-            if (horizontalOffset.magnitude > 1.1f)
+            if (horizontalOffset.magnitude > 1.25f)
                 return;
 
             var forward = Vector3.ProjectOnPlane(startRotation * Vector3.forward, Vector3.up).normalized;
@@ -3280,9 +3758,9 @@ namespace VRCombat.Core
             var right = Vector3.Cross(Vector3.up, forward).normalized;
             var fallbackOffsets = new[]
             {
-                forward * 1.85f,
-                forward * 2.45f - right * 0.95f,
-                forward * 2.45f + right * 0.95f
+                forward * 2.05f,
+                forward * 2.65f - right * 1.15f,
+                forward * 2.65f + right * 1.15f
             };
             var offset = fallbackOffsets[Mathf.Clamp(index, 0, fallbackOffsets.Length - 1)];
             table.transform.position = ResolveGroundedSpawnPosition(startPosition + offset);
@@ -3346,6 +3824,267 @@ namespace VRCombat.Core
 
             worldPosition.y += Mathf.Max(0.02f, m_TeleportSpawnHeightOffset);
             return worldPosition;
+        }
+
+        public bool TryResolveArenaSpawnPosition(
+            Vector3 desiredWorldPosition,
+            float capsuleRadius,
+            float capsuleHeight,
+            out Vector3 resolvedWorldPosition)
+        {
+            resolvedWorldPosition = ResolveGroundedSpawnPosition(desiredWorldPosition);
+            if (m_ArenaSurfaceColliders.Count == 0)
+                ConfigureArenaSurface();
+
+            if (m_ArenaSurfaceColliders.Count == 0 ||
+                !TryFindArenaRoot(out var arenaRoot) ||
+                !TryGetArenaWorldBounds(arenaRoot, out var arenaBounds))
+            {
+                return false;
+            }
+
+            var horizontalPadding = Mathf.Max(0.45f, capsuleRadius + 0.2f);
+            var minX = arenaBounds.min.x + horizontalPadding;
+            var maxX = arenaBounds.max.x - horizontalPadding;
+            var minZ = arenaBounds.min.z + horizontalPadding;
+            var maxZ = arenaBounds.max.z - horizontalPadding;
+            if (minX >= maxX || minZ >= maxZ)
+                return false;
+
+            var probeY = arenaBounds.max.y + ArenaGroundSnapProbeHeight + Mathf.Max(0.5f, capsuleHeight);
+            var probeDistance = Mathf.Max(arenaBounds.size.y + ArenaGroundSnapDistance + capsuleHeight + 2f, 6f);
+            var clampedDesired = new Vector3(
+                Mathf.Clamp(desiredWorldPosition.x, minX, maxX),
+                probeY,
+                Mathf.Clamp(desiredWorldPosition.z, minZ, maxZ));
+            if (TryFindClearArenaSpawnCandidate(
+                    clampedDesired,
+                    probeDistance,
+                    minX,
+                    maxX,
+                    minZ,
+                    maxZ,
+                    capsuleRadius,
+                    capsuleHeight,
+                    out resolvedWorldPosition))
+            {
+                return true;
+            }
+
+            var fallbackPoint = new Vector3(arenaBounds.center.x, probeY, arenaBounds.center.z);
+            if (TryFindClearArenaSpawnCandidate(
+                    fallbackPoint,
+                    probeDistance,
+                    minX,
+                    maxX,
+                    minZ,
+                    maxZ,
+                    capsuleRadius,
+                    capsuleHeight,
+                    out resolvedWorldPosition))
+            {
+                return true;
+            }
+
+            return false;
+        }
+
+        public bool TryResolveLooseGroundSpawnPosition(
+            Vector3 desiredWorldPosition,
+            float capsuleRadius,
+            float capsuleHeight,
+            out Vector3 resolvedWorldPosition)
+        {
+            resolvedWorldPosition = ResolveGroundedSpawnPosition(desiredWorldPosition);
+            Collider supportCollider = null;
+
+            var probeOrigin = desiredWorldPosition + Vector3.up * Mathf.Max(2f, capsuleHeight + 1.5f);
+            var probeDistance = Mathf.Max(6f, capsuleHeight + 6f);
+            if (Physics.Raycast(
+                    probeOrigin,
+                    Vector3.down,
+                    out var hit,
+                    probeDistance,
+                    ~0,
+                    QueryTriggerInteraction.Ignore))
+            {
+                resolvedWorldPosition = hit.point + Vector3.up * Mathf.Max(ArenaGroundSnapYOffset, m_TeleportSpawnHeightOffset);
+                supportCollider = hit.collider;
+            }
+
+            return HasLooseSpawnClearance(resolvedWorldPosition, capsuleRadius, capsuleHeight, supportCollider);
+        }
+
+        public bool TryResolveCombatEnemySpawnPosition(
+            Vector3 desiredWorldPosition,
+            float capsuleRadius,
+            float capsuleHeight,
+            out Vector3 resolvedWorldPosition)
+        {
+            if (TryResolveArenaSpawnPosition(desiredWorldPosition, capsuleRadius, capsuleHeight, out resolvedWorldPosition) ||
+                TryResolveLooseGroundSpawnPosition(desiredWorldPosition, capsuleRadius, capsuleHeight, out resolvedWorldPosition))
+            {
+                ReserveEncounterSpace(resolvedWorldPosition, 6f, 3f, 6f);
+                return true;
+            }
+
+            resolvedWorldPosition = default;
+            return false;
+        }
+
+        bool TryFindClearArenaSpawnCandidate(
+            Vector3 anchorPoint,
+            float probeDistance,
+            float minX,
+            float maxX,
+            float minZ,
+            float maxZ,
+            float capsuleRadius,
+            float capsuleHeight,
+            out Vector3 resolvedWorldPosition)
+        {
+            resolvedWorldPosition = default;
+
+            for (var attempt = 0; attempt < EnemySpawnResolutionAttempts; attempt++)
+            {
+                var samplePoint = GetArenaSpawnSamplePoint(anchorPoint, attempt, minX, maxX, minZ, maxZ);
+                if (!TryGetArenaGroundHit(samplePoint, probeDistance, out var hit))
+                    continue;
+
+                var groundedPosition = hit.point + Vector3.up * Mathf.Max(ArenaGroundSnapYOffset, m_TeleportSpawnHeightOffset);
+                if (!HasSpawnClearance(groundedPosition, capsuleRadius, capsuleHeight))
+                    continue;
+
+                resolvedWorldPosition = groundedPosition;
+                return true;
+            }
+
+            return false;
+        }
+
+        static Vector3 GetArenaSpawnSamplePoint(Vector3 clampedDesired, int attempt, float minX, float maxX, float minZ, float maxZ)
+        {
+            if (attempt <= 0)
+                return clampedDesired;
+
+            var normalizedAttempt = Mathf.Clamp01((attempt - 1) / (float)Mathf.Max(1, EnemySpawnResolutionAttempts - 2));
+            var angle = (attempt - 1) * 137.50776f * Mathf.Deg2Rad;
+            var radius = Mathf.Lerp(0.35f, EnemySpawnRetryRadius, normalizedAttempt);
+            var x = Mathf.Clamp(clampedDesired.x + Mathf.Cos(angle) * radius, minX, maxX);
+            var z = Mathf.Clamp(clampedDesired.z + Mathf.Sin(angle) * radius, minZ, maxZ);
+            return new Vector3(x, clampedDesired.y, z);
+        }
+
+        bool HasSpawnClearance(Vector3 rootPosition, float capsuleRadius, float capsuleHeight)
+        {
+            return CountSpawnBlockingColliders(rootPosition, capsuleRadius, capsuleHeight) == 0;
+        }
+
+        void RegisterEnemyKillZoneGrace(CapsuleEnemy enemy)
+        {
+            if (enemy == null)
+                return;
+
+            m_EnemyKillZoneGraceUntil[enemy] = Time.unscaledTime + EnemySpawnKillZoneGraceSeconds;
+        }
+
+        bool IsEnemyKillZoneGraceActive(CapsuleEnemy enemy)
+        {
+            if (enemy == null)
+                return false;
+
+            if (!m_EnemyKillZoneGraceUntil.TryGetValue(enemy, out var graceUntil))
+                return false;
+
+            if (Time.unscaledTime < graceUntil)
+                return true;
+
+            m_EnemyKillZoneGraceUntil.Remove(enemy);
+            return false;
+        }
+
+        bool HasLooseSpawnClearance(Vector3 rootPosition, float capsuleRadius, float capsuleHeight, Collider supportCollider)
+        {
+            var radius = Mathf.Max(0.05f, capsuleRadius + EnemySpawnClearanceSkin);
+            var height = Mathf.Max(radius * 2f + 0.1f, capsuleHeight);
+            var cylindricalHeight = Mathf.Max(0.01f, height - radius * 2f);
+            var bottom = rootPosition + Vector3.up * (radius + 0.02f);
+            var top = bottom + Vector3.up * cylindricalHeight;
+            var overlapCount = Physics.OverlapCapsuleNonAlloc(
+                bottom,
+                top,
+                radius,
+                s_SpawnClearanceBuffer,
+                ~0,
+                QueryTriggerInteraction.Ignore);
+
+            for (var i = 0; i < overlapCount; i++)
+            {
+                var collider = s_SpawnClearanceBuffer[i];
+                if (collider == null || !collider.enabled || collider.isTrigger)
+                    continue;
+
+                if (collider == supportCollider)
+                    continue;
+
+                if (m_RuntimeArenaTeleportCollider != null && collider == m_RuntimeArenaTeleportCollider)
+                    continue;
+
+                if (collider.bounds.max.y <= rootPosition.y + 0.06f)
+                    continue;
+
+                if (collider.GetComponentInParent<TeleportationArea>() != null ||
+                    collider.GetComponentInParent<ArenaOpeningEncounter>() != null ||
+                    collider.GetComponentInParent<TriggerSpawner>() != null)
+                {
+                    continue;
+                }
+
+                return false;
+            }
+
+            return true;
+        }
+
+        int CountSpawnBlockingColliders(Vector3 rootPosition, float capsuleRadius, float capsuleHeight)
+        {
+            var radius = Mathf.Max(0.05f, capsuleRadius + EnemySpawnClearanceSkin);
+            var height = Mathf.Max(radius * 2f + 0.1f, capsuleHeight);
+            var cylindricalHeight = Mathf.Max(0.01f, height - radius * 2f);
+            var bottom = rootPosition + Vector3.up * (radius + 0.02f);
+            var top = bottom + Vector3.up * cylindricalHeight;
+            var overlapCount = Physics.OverlapCapsuleNonAlloc(
+                bottom,
+                top,
+                radius,
+                s_SpawnClearanceBuffer,
+                ~0,
+                QueryTriggerInteraction.Ignore);
+            var blockingCount = 0;
+
+            for (var i = 0; i < overlapCount; i++)
+            {
+                var collider = s_SpawnClearanceBuffer[i];
+                if (collider == null || !collider.enabled || collider.isTrigger)
+                    continue;
+
+                if (ContainsCollider(m_ArenaSurfaceColliders, collider))
+                    continue;
+
+                if (m_RuntimeArenaTeleportCollider != null && collider == m_RuntimeArenaTeleportCollider)
+                    continue;
+
+                if (collider.GetComponentInParent<TeleportationArea>() != null ||
+                    collider.GetComponentInParent<ArenaOpeningEncounter>() != null ||
+                    collider.GetComponentInParent<TriggerSpawner>() != null)
+                {
+                    continue;
+                }
+
+                blockingCount++;
+            }
+
+            return blockingCount;
         }
 
         void MovePlayerToTeleportAnchor()
@@ -3624,6 +4363,22 @@ namespace VRCombat.Core
                 m_KillZoneAboveCenter = Mathf.Max(m_KillZoneAboveCenter, aboveDistance + Mathf.Max(0.5f, abovePadding));
         }
 
+        public void ReserveEncounterSpace(
+            Vector3 worldPosition,
+            float horizontalPadding = 8f,
+            float belowPadding = 3f,
+            float abovePadding = 8f)
+        {
+            if (!m_HasKillZoneCenter)
+                InitializeKillZoneCenter();
+
+            if (!m_HasKillZoneCenter)
+                return;
+
+            ExpandKillZoneToInclude(worldPosition, horizontalPadding, belowPadding, abovePadding);
+            EnsureRuntimeKillZoneBoundary();
+        }
+
         bool TryGetArenaWorldBounds(Transform arenaRoot, out Bounds bounds)
         {
             bounds = default;
@@ -3725,7 +4480,10 @@ namespace VRCombat.Core
                         : m_PlayerDamageReceiver.transform.position;
 
                     if (IsOutsideKillZone(playerPosition))
-                        m_PlayerDamageReceiver.ForceKill();
+                    {
+                        if (!TryKeepGroundedPlayerInsideKillZone(playerPosition))
+                            m_PlayerDamageReceiver.ForceKill();
+                    }
                 }
             }
 
@@ -3734,6 +4492,9 @@ namespace VRCombat.Core
             {
                 var enemy = m_ActiveWaveEnemies[i];
                 if (enemy == null)
+                    continue;
+
+                if (IsEnemyKillZoneGraceActive(enemy))
                     continue;
 
                 if (!IsOutsideKillZone(enemy.transform.position))
@@ -3800,11 +4561,24 @@ namespace VRCombat.Core
                 return;
             }
 
+            var playerPosition = m_PlayerCamera != null
+                ? m_PlayerCamera.transform.position
+                : playerDamageReceiver.transform.position;
+
+            if (!IsOutsideKillZone(playerPosition))
+                return;
+
+            if (TryKeepGroundedPlayerInsideKillZone(playerPosition))
+                return;
+
             playerDamageReceiver.ForceKill();
         }
 
         void OnKillZoneEnemyExited(CapsuleEnemy enemy)
         {
+            if (IsEnemyKillZoneGraceActive(enemy))
+                return;
+
             KillEnemyFromKillZone(enemy);
         }
 
@@ -3836,7 +4610,7 @@ namespace VRCombat.Core
             for (var i = 0; i < allEnemies.Length; i++)
             {
                 var enemy = allEnemies[i];
-                if (enemy == null || !IsOutsideKillZone(enemy.transform.position))
+                if (enemy == null || IsEnemyKillZoneGraceActive(enemy) || !IsOutsideKillZone(enemy.transform.position))
                     continue;
 
                 KillEnemyFromKillZone(enemy);
@@ -3862,6 +4636,9 @@ namespace VRCombat.Core
 
                 if (runtimeObject.TryGetComponent<CapsuleEnemy>(out var enemy))
                 {
+                    if (IsEnemyKillZoneGraceActive(enemy))
+                        continue;
+
                     KillEnemyFromKillZone(enemy);
                     continue;
                 }
@@ -3896,6 +4673,53 @@ namespace VRCombat.Core
                 return true;
 
             return false;
+        }
+
+        bool TryKeepGroundedPlayerInsideKillZone(Vector3 playerPosition)
+        {
+            if (!m_HasKillZoneCenter)
+                return false;
+
+            if (playerPosition.y < m_KillZoneCenter.y - Mathf.Max(0.5f, m_KillZoneBelowCenter))
+                return false;
+
+            var probeOrigin = playerPosition + Vector3.up * PlayerKillZoneGroundProbeHeight;
+            if (!Physics.Raycast(
+                    probeOrigin,
+                    Vector3.down,
+                    out var groundHit,
+                    PlayerKillZoneGroundProbeDistance,
+                    ~0,
+                    QueryTriggerInteraction.Ignore))
+            {
+                return false;
+            }
+
+            if (groundHit.collider == null ||
+                groundHit.collider.GetComponentInParent<RuntimeKillZoneBoundary>() != null ||
+                groundHit.collider.GetComponentInParent<PlayerDamageReceiver>() != null)
+            {
+                return false;
+            }
+
+            if (Vector3.Angle(groundHit.normal, Vector3.up) > PlayerKillZoneMaxGroundSlopeAngle)
+                return false;
+
+            if (playerPosition.y - groundHit.point.y > PlayerKillZoneMaxGroundDrop)
+                return false;
+
+            ExpandKillZoneToInclude(
+                groundHit.point,
+                PlayerKillZoneExpansionHorizontalPadding,
+                PlayerKillZoneExpansionBelowPadding,
+                PlayerKillZoneExpansionAbovePadding);
+            ExpandKillZoneToInclude(
+                playerPosition,
+                PlayerKillZoneExpansionHorizontalPadding,
+                PlayerKillZoneExpansionBelowPadding,
+                PlayerKillZoneExpansionAbovePadding);
+            EnsureRuntimeKillZoneBoundary();
+            return true;
         }
 
         void SpawnWallMountedLoadout()
@@ -4210,7 +5034,7 @@ namespace VRCombat.Core
             rigidbody.angularDamping = chainDefinition.RigidbodyAngularDamping;
             rigidbody.solverIterations = 18;
             rigidbody.solverVelocityIterations = 8;
-            rigidbody.maxAngularVelocity = 40f;
+            rigidbody.maxAngularVelocity = 220f;
             rigidbody.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
             rigidbody.interpolation = RigidbodyInterpolation.Interpolate;
 
@@ -4220,7 +5044,7 @@ namespace VRCombat.Core
                 allowDynamicAttach: true,
                 movementType: XRBaseInteractable.MovementType.Instantaneous);
             grabInteractable.throwOnDetach = false;
-            ConfigureWeaponHoldFollow(grabInteractable);
+            ConfigureChainHoldFollow(grabInteractable);
 
             var attachPoint = new GameObject("Attach Point");
             attachPoint.transform.SetParent(root.transform, false);
@@ -4230,7 +5054,7 @@ namespace VRCombat.Core
 
             var riggedChainWeapon = InitializeRuntimeChainWeapon(root, rigidbody, collider, chainDefinition);
 
-            SetupWallMountedPickup(root, grabInteractable, riggedChainWeapon, keepKinematicWhileHeld: true);
+            SetupWallMountedPickup(root, grabInteractable, riggedChainWeapon, keepKinematicWhileHeld: false);
         }
 
         void CreateWallShieldPickup(string pickupName, Vector3 worldPosition, Quaternion worldRotation)
@@ -4308,9 +5132,10 @@ namespace VRCombat.Core
         void SetupLoosePickup(
             GameObject pickupRoot,
             XRGrabInteractable grabInteractable,
-            RiggedChainWeapon riggedChainWeapon = null)
+            RiggedChainWeapon riggedChainWeapon = null,
+            bool keepKinematicWhileHeld = false)
         {
-            var mountedPickup = EnsureRuntimeMountedPickup(pickupRoot, riggedChainWeapon, keepKinematicWhileHeld: false);
+            var mountedPickup = EnsureRuntimeMountedPickup(pickupRoot, riggedChainWeapon, keepKinematicWhileHeld);
             if (mountedPickup == null || grabInteractable == null)
                 return;
 
@@ -4476,7 +5301,7 @@ namespace VRCombat.Core
                 allowDynamicAttach: true,
                 movementType: XRBaseInteractable.MovementType.Instantaneous);
             grabInteractable.throwOnDetach = false;
-            ConfigureWeaponHoldFollow(grabInteractable);
+            ConfigureChainHoldFollow(grabInteractable);
 
             var attachPoint = new GameObject(AttachPointObjectName);
             attachPoint.transform.SetParent(root.transform, false);
@@ -4542,7 +5367,7 @@ namespace VRCombat.Core
             rigidbody.angularDamping = chainDefinition.RigidbodyAngularDamping;
             rigidbody.solverIterations = 18;
             rigidbody.solverVelocityIterations = 8;
-            rigidbody.maxAngularVelocity = 40f;
+            rigidbody.maxAngularVelocity = 220f;
             rigidbody.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
             rigidbody.interpolation = RigidbodyInterpolation.Interpolate;
 
@@ -4562,7 +5387,7 @@ namespace VRCombat.Core
             var riggedChainWeapon = InitializeRuntimeChainWeapon(root, rigidbody, collider, chainDefinition);
 
             ConfigureRuntimeWeaponModifiers(root, WeaponKind.Chain);
-            SetupLoosePickup(root, grabInteractable, riggedChainWeapon);
+            SetupLoosePickup(root, grabInteractable, riggedChainWeapon, keepKinematicWhileHeld: false);
         }
 
         RiggedChainWeapon InitializeRuntimeChainWeapon(
@@ -4651,11 +5476,11 @@ namespace VRCombat.Core
                 movementType: XRBaseInteractable.MovementType.Instantaneous);
             grabInteractable.throwOnDetach = false;
 
-            var weapon = root.GetComponent<FlintlockWeapon>();
-            if (weapon != null)
-                weapon.ConfigureRuntimeModifiers(m_RunProgressionController);
+            if (!TryGetVisualBoundsRelativeToReference(root.transform, root.transform, out var flintlockBounds))
+                flintlockBounds = new Bounds(new Vector3(0f, 0f, 0.12f), new Vector3(0.16f, 0.12f, 0.42f));
 
-            SetupLoosePickup(root, grabInteractable);
+            EnsureConfiguredFlintlockWeapon(root, root.transform, flintlockBounds);
+            SetupLoosePickup(root, grabInteractable, keepKinematicWhileHeld: true);
             return true;
         }
 
@@ -4711,33 +5536,190 @@ namespace VRCombat.Core
                     flintlockBounds.min.z + flintlockBounds.size.z * 0.22f);
             ConfigureWeaponAttachTransform(root, grabInteractable, gripReferencePosition, WeaponKind.Flintlock);
 
-            var raycastOrigin = new GameObject("Raycast Origin");
-            raycastOrigin.transform.SetParent(root.transform, false);
-            raycastOrigin.transform.localRotation = Quaternion.identity;
-            var hasBulletBounds = TryGetNamedVisualBoundsRelativeToReference(visualRoot.transform, root.transform, "bullet", out var bulletBounds);
-            var raycastLocalPosition = hasBulletBounds
-                ? new Vector3(
-                    bulletBounds.center.x,
-                    bulletBounds.center.y,
-                    Mathf.Max(flintlockBounds.max.z + 0.02f, bulletBounds.max.z + 0.03f))
-                : new Vector3(0f, 0f, Mathf.Max(0.16f, flintlockBounds.max.z - 0.01f));
-            raycastOrigin.transform.localPosition = raycastLocalPosition;
+            EnsureConfiguredFlintlockWeapon(root, visualRoot.transform, flintlockBounds);
+            SetupLoosePickup(root, grabInteractable, keepKinematicWhileHeld: true);
+            return true;
+        }
 
-            var bulletTransform = FindChildByNameToken(visualRoot.transform, "bullet");
+        FlintlockWeapon EnsureConfiguredFlintlockWeapon(GameObject root, Transform visualRoot, Bounds flintlockBounds)
+        {
+            if (root == null)
+                return null;
+
+            var searchRoot = visualRoot != null ? visualRoot : root.transform;
+            var hasBulletBounds = TryGetNamedVisualBoundsRelativeToReference(searchRoot, root.transform, "bullet", out var bulletBounds);
+            var bulletTransform = FindChildByNameToken(searchRoot, "bullet");
+            var triggerTransform = FindChildByNameToken(searchRoot, "trigger");
+            var muzzleTransform = FindChildByNameToken(searchRoot, "muzzle");
+            var barrelTransform = FindChildByNameToken(searchRoot, "barrel");
+            var flashTransform = FindChildByNameToken(searchRoot, "flash");
+            ResolveFlintlockBarrelCenterline(
+                root.transform,
+                searchRoot,
+                flintlockBounds,
+                hasBulletBounds,
+                bulletBounds,
+                muzzleTransform,
+                barrelTransform,
+                flashTransform,
+                out var raycastLocalPosition,
+                out var barrelAxisLocal,
+                out var barrelUpLocal);
+
+            if (barrelAxisLocal.sqrMagnitude <= 0.0001f)
+                barrelAxisLocal = Vector3.forward;
+            if (barrelUpLocal.sqrMagnitude <= 0.0001f ||
+                Mathf.Abs(Vector3.Dot(barrelAxisLocal.normalized, barrelUpLocal.normalized)) > 0.98f)
+            {
+                barrelUpLocal = Mathf.Abs(Vector3.Dot(barrelAxisLocal.normalized, Vector3.up)) < 0.95f
+                    ? Vector3.up
+                    : Vector3.right;
+            }
+
+            barrelAxisLocal.Normalize();
+            barrelUpLocal = Vector3.ProjectOnPlane(barrelUpLocal, barrelAxisLocal).normalized;
+            var raycastLocalRotation = Quaternion.LookRotation(barrelAxisLocal, barrelUpLocal);
+
+            var raycastOriginTransform = FindChildByNameToken(root.transform, "raycast origin");
+            if (raycastOriginTransform == null)
+            {
+                var raycastOrigin = new GameObject("Raycast Origin");
+                raycastOrigin.transform.SetParent(root.transform, false);
+                raycastOriginTransform = raycastOrigin.transform;
+            }
+
+            raycastOriginTransform.localPosition = raycastLocalPosition;
+            raycastOriginTransform.localRotation = raycastLocalRotation;
+
             var bulletVisual = bulletTransform != null
                 ? bulletTransform.gameObject
-                : CreateRuntimeFlintlockBulletFallback(root.transform, hasBulletBounds ? bulletBounds : flintlockBounds, raycastLocalPosition);
-            var visualTrigger = FindChildByNameToken(visualRoot.transform, "trigger");
-            var weapon = root.AddComponent<FlintlockWeapon>();
-            weapon.attachedBullet = bulletVisual;
-            weapon.CacheAttachedBulletPose();
-            weapon.raycastOrigin = raycastOrigin.transform;
-            weapon.visualTrigger = visualTrigger;
-            weapon.ConfigureRuntimeModifiers(m_RunProgressionController);
-            weapon.ResetWeaponState();
+                : CreateRuntimeFlintlockBulletFallback(root.transform, raycastLocalPosition, barrelAxisLocal);
+            var visualTrigger = triggerTransform;
 
-            SetupLoosePickup(root, grabInteractable);
-            return true;
+            var weapon = root.GetComponent<FlintlockWeapon>();
+            if (weapon == null)
+                weapon = root.AddComponent<FlintlockWeapon>();
+
+            weapon.ConfigureRuntimeSetup(bulletVisual, raycastOriginTransform, visualTrigger, m_RunProgressionController);
+            return weapon;
+        }
+
+        static void ResolveFlintlockBarrelCenterline(
+            Transform rootTransform,
+            Transform searchRoot,
+            Bounds flintlockBounds,
+            bool hasBulletBounds,
+            Bounds bulletBounds,
+            Transform muzzleTransform,
+            Transform barrelTransform,
+            Transform flashTransform,
+            out Vector3 muzzleTipLocalPosition,
+            out Vector3 barrelAxisLocal,
+            out Vector3 barrelUpLocal)
+        {
+            muzzleTipLocalPosition = new Vector3(flintlockBounds.center.x, flintlockBounds.center.y, flintlockBounds.max.z);
+            barrelAxisLocal = Vector3.forward;
+            barrelUpLocal = Vector3.up;
+            if (rootTransform == null)
+                return;
+
+            var hasBarrelBounds = TryGetNamedVisualBoundsRelativeToReference(searchRoot, rootTransform, "barrel", out var barrelBounds);
+            var hasMuzzleBounds = TryGetNamedVisualBoundsRelativeToReference(searchRoot, rootTransform, "muzzle", out var muzzleBounds);
+            var hasFlashBounds = TryGetNamedVisualBoundsRelativeToReference(searchRoot, rootTransform, "flash", out var flashBounds);
+
+            var barrelCenterLocalPosition = hasBarrelBounds
+                ? barrelBounds.center
+                : hasBulletBounds
+                    ? bulletBounds.center
+                    : new Vector3(
+                        flintlockBounds.center.x,
+                        flintlockBounds.center.y,
+                        Mathf.Lerp(flintlockBounds.center.z, flintlockBounds.max.z, 0.35f));
+
+            var muzzleCenterLocalPosition = hasMuzzleBounds
+                ? muzzleBounds.center
+                : hasFlashBounds
+                    ? flashBounds.center
+                    : muzzleTransform != null
+                        ? rootTransform.InverseTransformPoint(muzzleTransform.position)
+                        : barrelTransform != null
+                            ? rootTransform.InverseTransformPoint(barrelTransform.position)
+                            : flashTransform != null
+                                ? rootTransform.InverseTransformPoint(flashTransform.position)
+                                : new Vector3(
+                                    flintlockBounds.center.x,
+                                    flintlockBounds.center.y,
+                                    flintlockBounds.max.z);
+
+            if (TryGetFlintlockLocalDirection(muzzleTransform ?? barrelTransform ?? flashTransform, rootTransform, out var sourceForwardLocal, out var sourceUpLocal))
+            {
+                if ((muzzleCenterLocalPosition - barrelCenterLocalPosition).sqrMagnitude > 0.0001f &&
+                    Vector3.Dot(sourceForwardLocal, muzzleCenterLocalPosition - barrelCenterLocalPosition) < 0f)
+                {
+                    sourceForwardLocal = -sourceForwardLocal;
+                }
+
+                barrelAxisLocal = sourceForwardLocal.sqrMagnitude > 0.0001f
+                    ? sourceForwardLocal.normalized
+                    : barrelAxisLocal;
+                barrelUpLocal = sourceUpLocal.sqrMagnitude > 0.0001f
+                    ? sourceUpLocal.normalized
+                    : barrelUpLocal;
+            }
+
+            var centerlineLocal = muzzleCenterLocalPosition - barrelCenterLocalPosition;
+            if (centerlineLocal.sqrMagnitude > 0.0001f &&
+                (barrelAxisLocal.sqrMagnitude <= 0.0001f ||
+                    Mathf.Abs(Vector3.Dot(barrelAxisLocal.normalized, centerlineLocal.normalized)) < 0.65f))
+            {
+                barrelAxisLocal = centerlineLocal.normalized;
+            }
+
+            if (barrelAxisLocal.sqrMagnitude <= 0.0001f)
+                barrelAxisLocal = Vector3.forward;
+
+            barrelAxisLocal.Normalize();
+
+            var muzzleReferenceBounds = hasMuzzleBounds
+                ? muzzleBounds
+                : hasFlashBounds
+                    ? flashBounds
+                    : hasBarrelBounds
+                        ? barrelBounds
+                        : flintlockBounds;
+            muzzleTipLocalPosition = GetBoundsCenterlineTip(muzzleReferenceBounds, barrelAxisLocal);
+
+            if ((muzzleTipLocalPosition - barrelCenterLocalPosition).sqrMagnitude > 0.0001f &&
+                Vector3.Dot(barrelAxisLocal, muzzleTipLocalPosition - barrelCenterLocalPosition) < 0f)
+            {
+                barrelAxisLocal = -barrelAxisLocal;
+                muzzleTipLocalPosition = GetBoundsCenterlineTip(muzzleReferenceBounds, barrelAxisLocal);
+            }
+        }
+
+        static bool TryGetFlintlockLocalDirection(Transform sourceTransform, Transform rootTransform, out Vector3 forwardLocal, out Vector3 upLocal)
+        {
+            forwardLocal = Vector3.zero;
+            upLocal = Vector3.zero;
+            if (sourceTransform == null || rootTransform == null)
+                return false;
+
+            forwardLocal = rootTransform.InverseTransformDirection(sourceTransform.forward);
+            upLocal = rootTransform.InverseTransformDirection(sourceTransform.up);
+            return forwardLocal.sqrMagnitude > 0.0001f;
+        }
+
+        static Vector3 GetBoundsCenterlineTip(Bounds bounds, Vector3 direction)
+        {
+            if (direction.sqrMagnitude <= 0.0001f)
+                return bounds.center;
+
+            var normalizedDirection = direction.normalized;
+            var projectedExtent =
+                Mathf.Abs(normalizedDirection.x) * bounds.extents.x +
+                Mathf.Abs(normalizedDirection.y) * bounds.extents.y +
+                Mathf.Abs(normalizedDirection.z) * bounds.extents.z;
+            return bounds.center + normalizedDirection * projectedExtent;
         }
 
         static Transform FindChildByNameToken(Transform root, string nameToken)
@@ -5351,7 +6333,7 @@ namespace VRCombat.Core
             if (m_InitialWaveDelaySeconds > 0f)
                 yield return new WaitForSeconds(m_InitialWaveDelaySeconds);
 
-            m_CurrentWave = 1;
+            m_CurrentWave = Mathf.Max(1, m_CurrentWave);
 
             while (!m_IsGameOver)
             {
@@ -5396,19 +6378,158 @@ namespace VRCombat.Core
 
                 var nextWave = m_CurrentWave + 1;
                 m_PlayerDamageReceiver?.RestoreFullHealth();
+                if (TryGetWaveUnlockEncounter(m_CurrentWave, out var waveUnlockEncounter))
+                {
+                    yield return HandleWaveMilestoneTransition(m_CurrentWave, nextWave, waveUnlockEncounter);
+                    if (m_IsGameOver)
+                        yield break;
+
+                    m_CurrentWave = nextWave;
+                    continue;
+                }
+
                 m_CombatHud?.ShowBanner($"Wave cleared. Wave {nextWave} incoming", 2.2f);
                 yield return new WaitForSeconds(m_TimeBetweenWavesSeconds);
                 m_CurrentWave = nextWave;
             }
         }
 
+        bool TryGetWaveUnlockEncounter(int clearedWave, out ArenaOpeningEncounter encounter)
+        {
+            encounter = null;
+            if (Array.IndexOf(s_WaveEncounterMilestones, clearedWave) < 0)
+                return false;
+
+            if (m_WaveUnlockEncounters.TryGetValue(clearedWave, out encounter) && encounter != null)
+                return true;
+
+            Debug.LogWarning(
+                $"[VRCombat] Wave {clearedWave} is configured as a milestone, but no ArenaOpeningEncounter is assigned with UnlockAfterWave = {clearedWave}.",
+                this);
+            return false;
+        }
+
+        IEnumerator HandleWaveMilestoneTransition(int clearedWave, int nextWave, ArenaOpeningEncounter encounter)
+        {
+            if (encounter == null)
+                yield break;
+
+            m_PendingWaveResumeEncounter = encounter;
+            m_DeferredNextWave = nextWave;
+            encounter.PrepareLockedGate(this);
+
+            m_CombatHud?.ShowBanner($"Wave {clearedWave} cleared. Defeat the key carrier.", 2.4f);
+            var keyCarrier = SpawnMilestoneKeyCarrier();
+            if (keyCarrier == null)
+            {
+                Debug.LogWarning(
+                    $"[VRCombat] Could not spawn the milestone key carrier for wave {clearedWave}. Continuing to the next wave immediately.",
+                    encounter);
+                m_PendingWaveResumeEncounter = null;
+                m_DeferredNextWave = -1;
+                yield return new WaitForSeconds(m_TimeBetweenWavesSeconds);
+                yield break;
+            }
+
+            m_MilestoneKeyCarrier = keyCarrier;
+            m_MilestoneKeyCarrier.Died -= HandleMilestoneKeyCarrierDied;
+            m_MilestoneKeyCarrier.Died += HandleMilestoneKeyCarrierDied;
+            if (!m_ActiveWaveEnemies.Contains(m_MilestoneKeyCarrier))
+                m_ActiveWaveEnemies.Add(m_MilestoneKeyCarrier);
+
+            while (!m_IsGameOver && m_MilestoneKeyCarrier != null)
+            {
+                m_CombatHud?.SetWaveInfo(m_CurrentWave, 1, m_CurrentFlowRate);
+                yield return null;
+            }
+
+            if (m_IsGameOver)
+                yield break;
+
+            m_IsWaitingForEncounterResume = true;
+            m_CombatHud?.ShowBanner($"Unlock the gate and clear the encounter to reach wave {nextWave}.", 2.6f);
+            while (!m_IsGameOver && m_IsWaitingForEncounterResume)
+                yield return null;
+
+            if (m_IsGameOver)
+                yield break;
+
+            var resumedWave = m_DeferredNextWave > 0 ? m_DeferredNextWave : nextWave;
+            m_DeferredNextWave = -1;
+            m_CombatHud?.ShowBanner($"Wave {resumedWave} incoming", 2.2f);
+            yield return new WaitForSeconds(m_TimeBetweenWavesSeconds);
+        }
+
+        CapsuleEnemy SpawnMilestoneKeyCarrier()
+        {
+            var seedPosition = GetEnemySpawnPosition();
+            if (!TryResolveCombatEnemySpawnPosition(seedPosition, 0.28f, 1.7f, out var position))
+            {
+                Debug.LogWarning("[VRCombat] Skipping milestone key carrier spawn because no safe spawn position was available.", this);
+                return null;
+            }
+
+            var rarity = GetRandomRarityForWave();
+            if (rarity == EnemyRarity.Common)
+                rarity = EnemyRarity.Uncommon;
+
+            return SpawnEnemyAt(position, rarity, null);
+        }
+
+        void HandleMilestoneKeyCarrierDied(CapsuleEnemy enemy)
+        {
+            if (enemy != null)
+                enemy.Died -= HandleMilestoneKeyCarrierDied;
+
+            if (!ReferenceEquals(enemy, m_MilestoneKeyCarrier))
+                return;
+
+            m_ActiveWaveEnemies.Remove(enemy);
+            m_MilestoneKeyCarrier = null;
+
+            if (m_PendingWaveResumeEncounter == null)
+                return;
+
+            m_PendingWaveResumeEncounter.SpawnConfiguredKeyAt(
+                this,
+                enemy != null ? enemy.transform.position : m_PendingWaveResumeEncounter.transform.position);
+        }
+
         EnemyRarity GetRandomRarityForWave()
         {
-            // Accelerated scaling to make rarity and abilities immediately apparent
-            float redWeight = 30f;
-            float greenWeight = m_CurrentWave * 20f + 20f;
-            float blueWeight = m_CurrentWave * 15f + 15f;
-            float goldWeight = m_CurrentWave * 10f + 10f;
+            float redWeight;
+            float greenWeight;
+            float blueWeight;
+            float goldWeight;
+
+            if (m_CurrentWave <= 2)
+            {
+                redWeight = 85f;
+                greenWeight = 15f;
+                blueWeight = 0f;
+                goldWeight = 0f;
+            }
+            else if (m_CurrentWave <= 4)
+            {
+                redWeight = 70f;
+                greenWeight = 22f;
+                blueWeight = 8f;
+                goldWeight = 0f;
+            }
+            else if (m_CurrentWave <= 7)
+            {
+                redWeight = 58f;
+                greenWeight = 25f;
+                blueWeight = 15f;
+                goldWeight = 2f;
+            }
+            else
+            {
+                redWeight = 45f;
+                greenWeight = 28f;
+                blueWeight = 20f;
+                goldWeight = 7f;
+            }
 
             float total = redWeight + greenWeight + blueWeight + goldWeight;
             float roll = UnityEngine.Random.Range(0, total);
@@ -5450,19 +6571,30 @@ namespace VRCombat.Core
             if (animationDriver != null)
                 enemy.AttachAnimationDriver(animationDriver);
 
+            RegisterEnemyKillZoneGrace(enemy);
+
             return enemy;
         }
 
         CapsuleEnemy SpawnSingleEnemy()
         {
-            var position = GetEnemySpawnPosition();
+            var seedPosition = GetEnemySpawnPosition();
+            if (!TryResolveCombatEnemySpawnPosition(seedPosition, 0.28f, 1.7f, out var position))
+            {
+                Debug.LogWarning("[VRCombat] Skipping enemy spawn because no safe spawn position was available.", this);
+                return null;
+            }
+
             return SpawnEnemyAt(position, GetRandomRarityForWave(), null);
         }
 
         void HandleEnemyDied(CapsuleEnemy enemy)
         {
             if (enemy != null)
+            {
                 enemy.Died -= HandleEnemyDied;
+                m_EnemyKillZoneGraceUntil.Remove(enemy);
+            }
 
             m_RunProgressionController?.AwardXp(EnemyXpReward);
         }
@@ -5701,9 +6833,14 @@ namespace VRCombat.Core
             return m_FlintlockBulletMaterial;
         }
 
+        public void RegisterSpawnedRuntimeObject(GameObject runtimeObject)
+        {
+            RegisterRuntimeObject(runtimeObject);
+        }
+
         void RegisterRuntimeObject(GameObject runtimeObject)
         {
-            if (runtimeObject == null)
+            if (runtimeObject == null || m_RuntimeSpawnedObjects.Contains(runtimeObject))
                 return;
 
             m_RuntimeSpawnedObjects.Add(runtimeObject);
@@ -5867,6 +7004,18 @@ namespace VRCombat.Core
             grabInteractable.smoothRotation = false;
             grabInteractable.tightenPosition = 1f;
             grabInteractable.tightenRotation = 1f;
+        }
+
+        static void ConfigureChainHoldFollow(XRGrabInteractable grabInteractable)
+        {
+            if (grabInteractable == null)
+                return;
+
+            ConfigureWeaponHoldFollow(grabInteractable);
+            grabInteractable.velocityDamping = 0.08f;
+            grabInteractable.velocityScale = 1.5f;
+            grabInteractable.angularVelocityDamping = 0.08f;
+            grabInteractable.angularVelocityScale = 1.45f;
         }
 
         static WeaponDefinition GetWeaponDefinitionOrDefault(WeaponKind weaponKind, float fallbackLength)
@@ -6106,7 +7255,7 @@ namespace VRCombat.Core
             return true;
         }
 
-        GameObject CreateRuntimeFlintlockBulletFallback(Transform parent, Bounds referenceBounds, Vector3 raycastLocalPosition)
+        GameObject CreateRuntimeFlintlockBulletFallback(Transform parent, Vector3 raycastLocalPosition, Vector3 barrelAxisLocal)
         {
             if (parent == null)
                 return null;
@@ -6114,10 +7263,8 @@ namespace VRCombat.Core
             var bulletVisual = GameObject.CreatePrimitive(PrimitiveType.Sphere);
             bulletVisual.name = "Attached Bullet";
             bulletVisual.transform.SetParent(parent, false);
-            bulletVisual.transform.localPosition = new Vector3(
-                referenceBounds.center.x,
-                referenceBounds.center.y,
-                Mathf.Min(referenceBounds.max.z, raycastLocalPosition.z - 0.03f));
+            var seatDirection = barrelAxisLocal.sqrMagnitude > 0.0001f ? barrelAxisLocal.normalized : Vector3.forward;
+            bulletVisual.transform.localPosition = raycastLocalPosition - seatDirection * 0.006f;
             bulletVisual.transform.localRotation = Quaternion.identity;
             bulletVisual.transform.localScale = Vector3.one * 0.014f;
             var renderer = bulletVisual.GetComponent<Renderer>();

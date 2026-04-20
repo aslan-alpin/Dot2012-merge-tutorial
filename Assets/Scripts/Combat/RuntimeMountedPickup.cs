@@ -97,7 +97,9 @@ namespace VRCombat.Combat
             m_Rigidbody.collisionDetectionMode = m_KeepKinematicWhileHeld
                 ? CollisionDetectionMode.ContinuousSpeculative
                 : CollisionDetectionMode.ContinuousDynamic;
-            m_Rigidbody.interpolation = RigidbodyInterpolation.None;
+            m_Rigidbody.interpolation = m_KeepKinematicWhileHeld
+                ? RigidbodyInterpolation.None
+                : RigidbodyInterpolation.Interpolate;
             m_Rigidbody.WakeUp();
 
             if (m_RiggedChainWeapon != null)

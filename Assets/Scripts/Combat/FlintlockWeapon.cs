@@ -25,11 +25,12 @@ namespace VRCombat.Combat
         const float DefaultProjectileSpeed = 30f;
         const float DefaultProjectileLifetime = 6f;
         const float DefaultProjectileRadius = 0.018f;
-        const float AttachedBulletFallbackSeatDistance = 0.035f;
+        const float AttachedBulletFallbackSeatDistance = 0.008f;
         const float AttachedBulletFallbackDistanceThreshold = 0.08f;
         const float FireSfxMinPitch = 0.96f;
         const float FireSfxMaxPitch = 1.04f;
         const float HitscanRadius = 0.028f;
+        const float MinimumVisibleProjectileDistance = 0.6f;
         const string FireSfxResourcePath = "SFX/flintlockfire";
         const string ReloadSfxResourcePath = "SFX/flintlockreload";
         const float MaxSfxPlayDuration = 1f;
@@ -104,6 +105,36 @@ namespace VRCombat.Combat
             m_ProgressionController = progressionController;
         }
 
+        public void ConfigureRuntimeSetup(
+            GameObject bulletVisual,
+            Transform fireOrigin,
+            Transform triggerVisual,
+            RunProgressionController progressionController = null)
+        {
+            if (progressionController != null)
+                m_ProgressionController = progressionController;
+
+            if (m_AttachedBulletTemplate != null && m_AttachedBulletTemplate != attachedBullet)
+                Destroy(m_AttachedBulletTemplate);
+
+            attachedBullet = bulletVisual;
+            raycastOrigin = fireOrigin;
+            visualTrigger = triggerVisual;
+            m_AttachedBulletTemplate = null;
+            m_AttachedBulletParent = null;
+
+            if (m_Interactable == null)
+                m_Interactable = GetComponent<XRGrabInteractable>();
+
+            ConfigureGrabInteractable();
+            EnsureGripAttachTransform();
+            EnsureFireAudioSource();
+            CacheAttachedBulletPose();
+            EnsureAttachedBulletTemplate();
+            ConfigureTriggerAnimation();
+            ResetWeaponState();
+        }
+
         void Awake()
         {
             m_Interactable = GetComponent<XRGrabInteractable>();
@@ -148,6 +179,8 @@ namespace VRCombat.Combat
 
             m_Interactable.selectEntered.AddListener(OnSelectEntered);
             m_Interactable.selectExited.AddListener(OnSelectExited);
+            m_Interactable.activated.AddListener(OnActivated);
+            m_Interactable.deactivated.AddListener(OnDeactivated);
         }
 
         void OnDisable()
@@ -157,6 +190,8 @@ namespace VRCombat.Combat
 
             m_Interactable.selectEntered.RemoveListener(OnSelectEntered);
             m_Interactable.selectExited.RemoveListener(OnSelectExited);
+            m_Interactable.activated.RemoveListener(OnActivated);
+            m_Interactable.deactivated.RemoveListener(OnDeactivated);
         }
 
         void Update()
@@ -208,6 +243,24 @@ namespace VRCombat.Combat
         void OnSelectExited(SelectExitEventArgs args)
         {
             ClearHeldState();
+        }
+
+        void OnActivated(ActivateEventArgs args)
+        {
+            if (args.interactorObject is IXRSelectInteractor selectInteractor)
+                m_HoldingInteractor = selectInteractor;
+
+            if (!m_HasHeldHandNode)
+                m_HasHeldHandNode = TryResolveHeldHandNode(args.interactorObject, out m_HeldHandNode);
+
+            m_WasHeldTriggerPressed = true;
+            Fire();
+        }
+
+        void OnDeactivated(DeactivateEventArgs args)
+        {
+            if (m_HoldingInteractor == null || args.interactorObject == m_HoldingInteractor)
+                m_WasHeldTriggerPressed = false;
         }
 
         void ConfigureGrabInteractable()
@@ -298,6 +351,12 @@ namespace VRCombat.Combat
             m_TriggerAnimationTransform = visualTrigger;
             if (visualTrigger == null || visualTrigger.parent == null)
                 return;
+
+            if (string.Equals(visualTrigger.parent.name, TriggerPivotName, StringComparison.Ordinal))
+            {
+                m_TriggerAnimationTransform = visualTrigger.parent;
+                return;
+            }
 
             if (Mathf.Abs(triggerEndRotation.x) > 0.01f &&
                 Mathf.Abs(triggerEndRotation.y) < 0.01f &&
@@ -683,10 +742,11 @@ namespace VRCombat.Combat
             var maxDistance = Mathf.Max(0.25f, range);
             var visualTravelDistance = maxDistance;
             var ignoredColliders = CollectIgnoredProjectileColliders();
-            if (TryResolveShotImpact(origin, direction, maxDistance, ignoredColliders, out var impact))
+            if (TryResolveShotImpact(origin, direction, maxDistance, ignoredColliders, out var impact) ||
+                TryResolveFallbackShotImpact(origin, direction, maxDistance, ignoredColliders, out impact))
             {
                 ApplyResolvedShotImpact(impact, direction);
-                visualTravelDistance = Mathf.Max(0.02f, impact.distance);
+                visualTravelDistance = Mathf.Max(MinimumVisibleProjectileDistance, impact.distance);
             }
 
             projectileObject.transform.SetPositionAndRotation(origin, Quaternion.LookRotation(direction, Vector3.up));
@@ -715,12 +775,15 @@ namespace VRCombat.Combat
         {
             var fireAnchor = GetFireAnchor();
             return fireAnchor != null
-                ? fireAnchor.position
+                ? fireAnchor.position + GetFireDirection() * 0.002f
                 : transform.position + GetFireDirection() * 0.12f;
         }
 
         Vector3 GetFireDirection()
         {
+            if (raycastOrigin != null && raycastOrigin.forward.sqrMagnitude > MinimumDirectionMagnitude)
+                return raycastOrigin.forward.normalized;
+
             if (TryGetBarrelDirection(out var barrelDirection))
                 return barrelDirection;
 
@@ -748,23 +811,49 @@ namespace VRCombat.Combat
         bool TryGetBarrelDirection(out Vector3 direction)
         {
             direction = Vector3.zero;
+            if (raycastOrigin != null && raycastOrigin.forward.sqrMagnitude > MinimumDirectionMagnitude)
+            {
+                direction = raycastOrigin.forward.normalized;
+                return true;
+            }
+
             if (raycastOrigin == null || attachedBullet == null)
                 return false;
 
             var muzzleVector = raycastOrigin.position - attachedBullet.transform.position;
             if (muzzleVector.sqrMagnitude <= MinimumDirectionMagnitude)
                 return false;
-
-            var referenceDirection = raycastOrigin.forward.sqrMagnitude > MinimumDirectionMagnitude
-                ? raycastOrigin.forward.normalized
-                : transform.forward.normalized;
-            var normalizedVector = muzzleVector.normalized;
-            var alignment = Vector3.Dot(referenceDirection, normalizedVector);
-            if (Mathf.Abs(alignment) < 0.5f)
-                return false;
-
-            direction = alignment >= 0f ? normalizedVector : -normalizedVector;
+            direction = muzzleVector.normalized;
             return true;
+        }
+
+        bool TryResolveFallbackShotImpact(
+            Vector3 origin,
+            Vector3 primaryDirection,
+            float maxDistance,
+            Collider[] ignoredColliders,
+            out RaycastHit resolvedHit)
+        {
+            resolvedHit = default;
+
+            if (TryGetBarrelDirection(out var barrelDirection) &&
+                Vector3.Dot(primaryDirection, barrelDirection) < 0.995f &&
+                TryResolveShotImpact(origin, barrelDirection, maxDistance, ignoredColliders, out resolvedHit))
+            {
+                return true;
+            }
+
+            if (transform.forward.sqrMagnitude > MinimumDirectionMagnitude)
+            {
+                var fallbackDirection = transform.forward.normalized;
+                if (Vector3.Dot(primaryDirection, fallbackDirection) < 0.995f &&
+                    TryResolveShotImpact(origin, fallbackDirection, maxDistance, ignoredColliders, out resolvedHit))
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         bool TryResolveShotImpact(
@@ -933,26 +1022,23 @@ namespace VRCombat.Combat
             projectileObject = null;
 
             var projectileTemplate = GetProjectileTemplate();
-            if (projectileTemplate == null)
+            if (projectileTemplate != null)
             {
-                Debug.LogWarning($"[VRCombat] Flintlock '{name}' is missing a projectile template.", this);
-                return false;
+                projectileObject = Instantiate(projectileTemplate);
+                projectileObject.name = projectileTemplate.name.Replace(" Template", string.Empty);
+                projectileObject.hideFlags = HideFlags.None;
+                projectileObject.SetActive(false);
+                return true;
             }
 
-            projectileObject = Instantiate(projectileTemplate);
-            projectileObject.name = projectileTemplate.name.Replace(" Template", string.Empty);
-            projectileObject.hideFlags = HideFlags.None;
+            projectileObject = new GameObject("Flintlock Projectile");
             projectileObject.SetActive(false);
             return true;
         }
 
         GameObject GetProjectileTemplate()
         {
-            if (m_ProjectileTemplate != null)
-                return m_ProjectileTemplate;
-
-            EnsureAttachedBulletTemplate();
-            return m_AttachedBulletTemplate;
+            return m_ProjectileTemplate;
         }
 
         void EnsureAttachedBulletTemplate()
@@ -1002,7 +1088,42 @@ namespace VRCombat.Combat
         bool TryGetFallbackAttachedBulletLocalPosition(Transform parent, out Vector3 localPosition)
         {
             localPosition = Vector3.zero;
-            return false;
+            if (parent == null || raycastOrigin == null)
+                return false;
+
+            var fireDirection = raycastOrigin.forward.sqrMagnitude > MinimumDirectionMagnitude
+                ? raycastOrigin.forward.normalized
+                : transform.forward.normalized;
+            if (fireDirection.sqrMagnitude <= MinimumDirectionMagnitude)
+                return false;
+
+            var seatWorldPosition = raycastOrigin.position - fireDirection * GetAttachedBulletSeatDistance(fireDirection);
+            localPosition = parent.InverseTransformPoint(seatWorldPosition);
+            return true;
+        }
+
+        float GetAttachedBulletSeatDistance(Vector3 fireDirection)
+        {
+            var seatDistance = AttachedBulletFallbackSeatDistance;
+            if (attachedBullet == null)
+                return seatDistance;
+
+            var renderers = attachedBullet.GetComponentsInChildren<Renderer>(true);
+            for (var i = 0; i < renderers.Length; i++)
+            {
+                var renderer = renderers[i];
+                if (renderer == null || !renderer.enabled)
+                    continue;
+
+                var bounds = renderer.bounds;
+                var projectedExtent =
+                    Mathf.Abs(fireDirection.x) * bounds.extents.x +
+                    Mathf.Abs(fireDirection.y) * bounds.extents.y +
+                    Mathf.Abs(fireDirection.z) * bounds.extents.z;
+                seatDistance = Mathf.Max(seatDistance, projectedExtent + 0.001f);
+            }
+
+            return seatDistance;
         }
 
         Collider[] CollectIgnoredProjectileColliders()
@@ -1068,6 +1189,11 @@ namespace VRCombat.Combat
     [DisallowMultipleComponent]
     public class FlintlockProjectile : MonoBehaviour
     {
+        const float MinimumVisualRadius = 0.0125f;
+        const float TrailDuration = 0.08f;
+        static Material s_TrailMaterial;
+        static Material s_GlowMaterial;
+
         Rigidbody m_Rigidbody;
         float m_MaxTravelDistance;
         float m_TravelDistance;
@@ -1097,6 +1223,8 @@ namespace VRCombat.Combat
                 m_Rigidbody.linearVelocity = Vector3.zero;
                 m_Rigidbody.angularVelocity = Vector3.zero;
             }
+
+            EnsureVisiblePresentation(Mathf.Max(MinimumVisualRadius, fallbackRadius));
         }
 
         void Update()
@@ -1152,6 +1280,140 @@ namespace VRCombat.Combat
                 Mathf.Max(bounds.extents.x, Mathf.Max(bounds.extents.y, bounds.extents.z)));
             sphereCollider.enabled = false;
             return sphereCollider;
+        }
+
+        void EnsureVisiblePresentation(float minimumRadius)
+        {
+            DisableImportedProjectilePresentation();
+            var glowRenderer = EnsureGlowVisual(minimumRadius);
+            if (glowRenderer != null)
+                glowRenderer.enabled = true;
+
+            var trail = GetComponent<TrailRenderer>();
+            if (trail == null)
+                trail = gameObject.AddComponent<TrailRenderer>();
+
+            trail.time = TrailDuration;
+            trail.minVertexDistance = 0.01f;
+            trail.startWidth = minimumRadius * 1.45f;
+            trail.endWidth = minimumRadius * 0.55f;
+            trail.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            trail.receiveShadows = false;
+            trail.alignment = LineAlignment.View;
+            trail.material = GetTrailMaterial();
+            trail.startColor = new Color(1f, 0.92f, 0.72f, 0.95f);
+            trail.endColor = new Color(1f, 0.72f, 0.26f, 0f);
+            trail.enabled = true;
+            trail.Clear();
+        }
+
+        void DisableImportedProjectilePresentation()
+        {
+            var cameras = GetComponentsInChildren<Camera>(true);
+            for (var i = 0; i < cameras.Length; i++)
+            {
+                if (cameras[i] != null)
+                    cameras[i].enabled = false;
+            }
+
+            var renderers = GetComponentsInChildren<Renderer>(true);
+            for (var i = 0; i < renderers.Length; i++)
+            {
+                var renderer = renderers[i];
+                if (renderer == null || renderer is TrailRenderer)
+                    continue;
+
+                renderer.enabled = false;
+            }
+        }
+
+        Renderer EnsureGlowVisual(float minimumRadius)
+        {
+            var glowTransform = transform.Find("Projectile Glow");
+            GameObject glowObject;
+            if (glowTransform == null)
+            {
+                glowObject = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+                glowObject.name = "Projectile Glow";
+                glowObject.transform.SetParent(transform, false);
+
+                var glowCollider = glowObject.GetComponent<Collider>();
+                if (glowCollider != null)
+                    Destroy(glowCollider);
+            }
+            else
+            {
+                glowObject = glowTransform.gameObject;
+            }
+
+            glowObject.transform.localPosition = Vector3.zero;
+            glowObject.transform.localRotation = Quaternion.identity;
+            glowObject.transform.localScale = Vector3.one * (minimumRadius * 2.15f);
+
+            var glowRenderer = glowObject.GetComponent<Renderer>();
+            if (glowRenderer == null)
+                return null;
+
+            glowRenderer.enabled = true;
+            glowRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            glowRenderer.receiveShadows = false;
+            glowRenderer.sharedMaterial = GetGlowMaterial();
+            return glowRenderer;
+        }
+
+        static Bounds Encapsulate(Bounds a, Bounds b)
+        {
+            a.Encapsulate(b.min);
+            a.Encapsulate(b.max);
+            return a;
+        }
+
+        static Material GetTrailMaterial()
+        {
+            if (s_TrailMaterial != null)
+                return s_TrailMaterial;
+
+            var shader = Shader.Find("Sprites/Default");
+            if (shader == null)
+                shader = Shader.Find("Universal Render Pipeline/Unlit");
+            if (shader == null)
+                shader = Shader.Find("Unlit/Color");
+            if (shader == null)
+                return null;
+
+            s_TrailMaterial = new Material(shader)
+            {
+                name = "Runtime Flintlock Trail Material"
+            };
+            if (s_TrailMaterial.HasProperty("_Color"))
+                s_TrailMaterial.color = new Color(1f, 0.85f, 0.45f, 1f);
+            return s_TrailMaterial;
+        }
+
+        static Material GetGlowMaterial()
+        {
+            if (s_GlowMaterial != null)
+                return s_GlowMaterial;
+
+            var shader = Shader.Find("Universal Render Pipeline/Unlit");
+            if (shader == null)
+                shader = Shader.Find("Sprites/Default");
+            if (shader == null)
+                shader = Shader.Find("Unlit/Color");
+            if (shader == null)
+                return null;
+
+            s_GlowMaterial = new Material(shader)
+            {
+                name = "Runtime Flintlock Glow Material"
+            };
+
+            if (s_GlowMaterial.HasProperty("_BaseColor"))
+                s_GlowMaterial.SetColor("_BaseColor", new Color(1f, 0.82f, 0.42f, 0.95f));
+            if (s_GlowMaterial.HasProperty("_Color"))
+                s_GlowMaterial.color = new Color(1f, 0.82f, 0.42f, 0.95f);
+
+            return s_GlowMaterial;
         }
     }
 }
