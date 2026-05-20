@@ -1,5 +1,7 @@
+using System;
 using UnityEngine;
 using UnityEngine.XR.Interaction.Toolkit;
+using UnityEngine.XR.Interaction.Toolkit.Filtering;
 using UnityEngine.XR.Interaction.Toolkit.Interactables;
 using VRCombat.Combat;
 
@@ -11,6 +13,7 @@ namespace VRCombat.Environment
         [SerializeField] Vector3 m_FallbackColliderSize = new Vector3(0.18f, 0.18f, 0.48f);
         [SerializeField] Vector3 m_FallbackColliderCenter = Vector3.zero;
         [SerializeField] Vector3 m_GrabRotationOffset = Vector3.zero;
+        [SerializeField] bool m_HideTorchGeometryForKey = true;
 
         Rigidbody m_Rigidbody;
         Collider m_PrimaryCollider;
@@ -33,6 +36,7 @@ namespace VRCombat.Environment
         public void ConfigureRuntimeInstance(int keyId)
         {
             m_KeyId = Mathf.Max(0, keyId);
+            ConfigureKeyOnlyVisuals();
             EnsurePhysicsComponents();
             ConfigureRigidbody();
             ConfigureGrabInteractable();
@@ -68,7 +72,10 @@ namespace VRCombat.Environment
                 m_PrimaryCollider = GetComponentInChildren<Collider>(true);
 
             if (m_PrimaryCollider != null)
+            {
+                ConfigureKeyCollider(m_PrimaryCollider);
                 return;
+            }
 
             var boxCollider = GetComponent<BoxCollider>() ?? gameObject.AddComponent<BoxCollider>();
             if (TryGetRendererBounds(out var bounds))
@@ -83,6 +90,7 @@ namespace VRCombat.Environment
             }
 
             m_PrimaryCollider = boxCollider;
+            ConfigureKeyCollider(m_PrimaryCollider);
         }
 
         void ConfigureRigidbody()
@@ -104,6 +112,8 @@ namespace VRCombat.Environment
         {
             if (m_GrabInteractable == null)
                 m_GrabInteractable = GetComponent<XRGrabInteractable>() ?? gameObject.AddComponent<XRGrabInteractable>();
+
+            m_GrabInteractable.enabled = true;
 
             var attachTransform = m_GrabInteractable.attachTransform;
             var createdAttachTransform = false;
@@ -137,10 +147,67 @@ namespace VRCombat.Environment
             m_GrabInteractable.smoothRotation = false;
             m_GrabInteractable.tightenPosition = 1f;
             m_GrabInteractable.tightenRotation = 1f;
+            m_GrabInteractable.selectMode = InteractableSelectMode.Single;
 
             m_GrabInteractable.colliders.Clear();
-            if (m_PrimaryCollider != null)
+            var grabColliders = GetComponentsInChildren<Collider>(true);
+            for (var i = 0; i < grabColliders.Length; i++)
+            {
+                var grabCollider = grabColliders[i];
+                if (grabCollider == null)
+                    continue;
+
+                if (m_HideTorchGeometryForKey && IsTorchGeometryTransform(grabCollider.transform))
+                {
+                    grabCollider.enabled = false;
+                    continue;
+                }
+
+                ConfigureKeyCollider(grabCollider);
+                m_GrabInteractable.colliders.Add(grabCollider);
+            }
+
+            if (m_GrabInteractable.colliders.Count == 0 && m_PrimaryCollider != null)
                 m_GrabInteractable.colliders.Add(m_PrimaryCollider);
+
+            EnsureSingleOwnerWhileHeldSelectFilter();
+        }
+
+        static void ConfigureKeyCollider(Collider keyCollider)
+        {
+            if (keyCollider == null)
+                return;
+
+            keyCollider.enabled = true;
+            keyCollider.isTrigger = false;
+        }
+
+        void EnsureSingleOwnerWhileHeldSelectFilter()
+        {
+            if (m_GrabInteractable == null)
+                return;
+
+            var filter = GetComponent<SingleOwnerWhileHeldSelectFilter>();
+            if (filter == null)
+                filter = gameObject.AddComponent<SingleOwnerWhileHeldSelectFilter>();
+
+            AddSelectFilterIfMissing(m_GrabInteractable, filter);
+        }
+
+        static void AddSelectFilterIfMissing(XRBaseInteractable interactable, IXRSelectFilter filter)
+        {
+            if (interactable == null || filter == null)
+                return;
+
+            var filters = new System.Collections.Generic.List<IXRSelectFilter>();
+            interactable.selectFilters.GetAll(filters);
+            for (var i = 0; i < filters.Count; i++)
+            {
+                if (object.ReferenceEquals(filters[i], filter))
+                    return;
+            }
+
+            interactable.selectFilters.Add(filter);
         }
 
         void ConfigureMountedPickup()
@@ -152,6 +219,64 @@ namespace VRCombat.Environment
                 m_MountedPickup = GetComponent<RuntimeMountedPickup>() ?? gameObject.AddComponent<RuntimeMountedPickup>();
 
             m_MountedPickup.Configure(m_Rigidbody, riggedChainWeapon: null, keepKinematicWhileHeld: true);
+        }
+
+        void ConfigureKeyOnlyVisuals()
+        {
+            DisableTorchLighting();
+
+            if (!m_HideTorchGeometryForKey)
+                return;
+
+            var renderers = GetComponentsInChildren<Renderer>(true);
+            for (var i = 0; i < renderers.Length; i++)
+            {
+                var keyRenderer = renderers[i];
+                if (keyRenderer != null && IsTorchGeometryRenderer(keyRenderer))
+                    keyRenderer.enabled = false;
+            }
+
+            var colliders = GetComponentsInChildren<Collider>(true);
+            for (var i = 0; i < colliders.Length; i++)
+            {
+                var keyCollider = colliders[i];
+                if (keyCollider != null && IsTorchGeometryTransform(keyCollider.transform))
+                    keyCollider.enabled = false;
+            }
+        }
+
+        void DisableTorchLighting()
+        {
+            var torchLightSources = GetComponentsInChildren<TorchLightSource>(true);
+            for (var i = 0; i < torchLightSources.Length; i++)
+            {
+                if (torchLightSources[i] != null)
+                    torchLightSources[i].enabled = false;
+            }
+
+            var lights = GetComponentsInChildren<Light>(true);
+            for (var i = 0; i < lights.Length; i++)
+            {
+                var keyLight = lights[i];
+                if (keyLight != null && IsTorchGeometryTransform(keyLight.transform))
+                    keyLight.enabled = false;
+            }
+
+            var particles = GetComponentsInChildren<ParticleSystem>(true);
+            for (var i = 0; i < particles.Length; i++)
+            {
+                var keyParticles = particles[i];
+                if (keyParticles != null && IsTorchGeometryTransform(keyParticles.transform))
+                    keyParticles.Stop(true, ParticleSystemStopBehavior.StopEmittingAndClear);
+            }
+
+            var audioSources = GetComponentsInChildren<AudioSource>(true);
+            for (var i = 0; i < audioSources.Length; i++)
+            {
+                var keyAudio = audioSources[i];
+                if (keyAudio != null && IsTorchGeometryTransform(keyAudio.transform))
+                    keyAudio.Stop();
+            }
         }
 
         void RegisterGrabListeners()
@@ -293,6 +418,9 @@ namespace VRCombat.Environment
                 if (renderer == null)
                     continue;
 
+                if (m_HideTorchGeometryForKey && IsTorchGeometryRenderer(renderer))
+                    continue;
+
                 var localBounds = ConvertWorldBoundsToLocal(renderer.bounds);
                 if (!hasBounds)
                 {
@@ -309,6 +437,57 @@ namespace VRCombat.Environment
                 bounds.Expand(0.03f);
 
             return hasBounds;
+        }
+
+        static bool IsTorchGeometryRenderer(Renderer renderer)
+        {
+            if (renderer == null)
+                return false;
+
+            if (IsTorchGeometryTransform(renderer.transform))
+                return true;
+
+            if (renderer is SkinnedMeshRenderer skinnedMeshRenderer && IsTorchVisualName(skinnedMeshRenderer.sharedMesh?.name))
+                return true;
+
+            var meshFilter = renderer.GetComponent<MeshFilter>();
+            if (meshFilter != null && IsTorchVisualName(meshFilter.sharedMesh?.name))
+                return true;
+
+            var materials = renderer.sharedMaterials;
+            for (var i = 0; i < materials.Length; i++)
+            {
+                var material = materials[i];
+                if (material != null && IsTorchVisualName(material.name))
+                    return true;
+            }
+
+            return false;
+        }
+
+        static bool IsTorchGeometryTransform(Transform candidate)
+        {
+            var current = candidate;
+            while (current != null)
+            {
+                if (IsTorchVisualName(current.name))
+                    return true;
+
+                current = current.parent;
+            }
+
+            return false;
+        }
+
+        static bool IsTorchVisualName(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+                return false;
+
+            var namesTorchVisual = value.IndexOf("Torch", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                   value.IndexOf("Flame", StringComparison.OrdinalIgnoreCase) >= 0;
+            var namesKey = value.IndexOf("Key", StringComparison.OrdinalIgnoreCase) >= 0;
+            return namesTorchVisual && !namesKey;
         }
 
         Bounds ConvertWorldBoundsToLocal(Bounds worldBounds)

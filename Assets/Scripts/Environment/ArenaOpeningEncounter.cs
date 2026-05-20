@@ -64,13 +64,15 @@ namespace VRCombat.Environment
         }
 
         const string DefaultArenaResourcePath = "CombatModels/Arena_01";
-        const string DefaultKeyResourcePath = "CombatModels/Key_Torch";
+        const string DefaultKeyResourcePath = "CombatModels/Arena_Key";
+        const string LegacyLitKeyTorchResourcePath = "CombatModels/Key_Torch_Light";
+        const string LegacyPackedKeyResourcePath = "CombatModels/Key_Torch";
         const float GoblinSpawnCapsuleRadius = 0.28f;
         const float GoblinSpawnCapsuleHeight = 1.7f;
-        const float KeyDropCapsuleRadius = 0.1f;
-        const float KeyDropCapsuleHeight = 0.3f;
         const float EncounterSpawnFallbackRadius = 2.4f;
         const int EncounterSpawnFallbackSamples = 6;
+        const float DuplicateSpawnSeparationRadius = 0.68f;
+        const int DuplicateSpawnRingCapacity = 6;
         static readonly GoblinSpawnEntry[] s_DefaultGoblinGroup =
         {
             new GoblinSpawnEntry { localPosition = new Vector3(-2f, 0f, 2.2f), rarity = EnemyRarity.Common, dropsKey = false },
@@ -504,6 +506,7 @@ namespace VRCombat.Environment
                 if (enemy == null)
                     continue;
 
+                m_Bootstrapper.ReserveEncounterSpace(spawnPosition, 6f, 3f, 6f);
                 enemy.Died += HandleEncounterEnemyDied;
                 m_EncounterEnemies.Add(enemy);
 
@@ -534,19 +537,7 @@ namespace VRCombat.Environment
 
         bool IsValidGoblinGroup(GoblinSpawnEntry[] goblinGroup)
         {
-            if (goblinGroup == null || goblinGroup.Length == 0)
-                return false;
-
-            if (m_CompletionMode != EncounterCompletionMode.RequireGateUnlock)
-                return true;
-
-            for (var i = 0; i < goblinGroup.Length; i++)
-            {
-                if (goblinGroup[i].dropsKey)
-                    return true;
-            }
-
-            return false;
+            return goblinGroup != null && goblinGroup.Length > 0;
         }
 
         void HandleEncounterEnemyDied(CapsuleEnemy enemy)
@@ -609,25 +600,41 @@ namespace VRCombat.Environment
 
         Vector3 ResolveKeyDropSpawnPosition(Vector3 desiredWorldPosition)
         {
-            if (m_Bootstrapper != null &&
-                m_Bootstrapper.TryResolveArenaSpawnPosition(
-                    desiredWorldPosition,
-                    KeyDropCapsuleRadius,
-                    KeyDropCapsuleHeight,
-                    out var resolvedSpawnPosition))
-            {
-                return resolvedSpawnPosition;
-            }
-
+            // Keys should drop where the authored carrier died; do not let arena fallback move them to another room.
             return ResolveGroundedSpawnPosition(desiredWorldPosition);
         }
 
         GameObject ResolveKeyDropPrefab()
         {
-            if (m_KeyDropPrefab != null)
+            if (m_KeyDropPrefab != null && !IsLegacyTorchDropPrefab(m_KeyDropPrefab))
                 return m_KeyDropPrefab;
 
-            return Resources.Load<GameObject>(DefaultKeyResourcePath);
+            var keyPrefab = Resources.Load<GameObject>(DefaultKeyResourcePath);
+            if (keyPrefab != null)
+                return keyPrefab;
+
+            var legacyLitPrefab = Resources.Load<GameObject>(LegacyLitKeyTorchResourcePath);
+            if (legacyLitPrefab != null && !IsLegacyTorchDropPrefab(legacyLitPrefab))
+                return legacyLitPrefab;
+
+            return m_KeyDropPrefab != null && !IsTorchOnlyPrefab(m_KeyDropPrefab)
+                ? m_KeyDropPrefab
+                : Resources.Load<GameObject>(LegacyPackedKeyResourcePath);
+        }
+
+        static bool IsLegacyTorchDropPrefab(GameObject prefab)
+        {
+            return prefab != null &&
+                   (string.Equals(prefab.name, "Key_Torch", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(prefab.name, "Key_Torch_Light", StringComparison.OrdinalIgnoreCase) ||
+                    IsTorchOnlyPrefab(prefab));
+        }
+
+        static bool IsTorchOnlyPrefab(GameObject prefab)
+        {
+            return prefab != null &&
+                   (string.Equals(prefab.name, "Torch", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(prefab.name, "Torch_Light", StringComparison.OrdinalIgnoreCase));
         }
 
         void HandlePadlockUnlocked(Padlock padlock, KeyItem key)
@@ -803,11 +810,21 @@ namespace VRCombat.Environment
             GoblinSpawnEntry entry,
             out Vector3 spawnPosition)
         {
-            if (TryResolveEncounterSpawnLocalPosition(entry.localPosition, out spawnPosition))
+            var resolvedLocalPosition = GetResolvedEncounterSpawnLocalPosition(goblinGroup, entryIndex, entry.localPosition);
+            if (UsesAuthoredEncounterGroup(goblinGroup))
+            {
+                // Authored encounter entries are the source of truth: only snap vertically.
+                spawnPosition = ResolveGroundedSpawnPosition(transform.TransformPoint(resolvedLocalPosition));
+                return true;
+            }
+
+            if (TryResolveEncounterSpawnLocalPosition(resolvedLocalPosition, out spawnPosition))
                 return true;
 
             if (TryResolveDefaultEncounterSpawnPosition(entryIndex, goblinGroup, out spawnPosition))
+            {
                 return true;
+            }
 
             if (m_Bootstrapper == null)
             {
@@ -867,7 +884,7 @@ namespace VRCombat.Environment
         bool TryResolveEncounterSpawnLocalPosition(Vector3 localPosition, out Vector3 spawnPosition)
         {
             var desiredPosition = transform.TransformPoint(localPosition);
-            if (TryResolveAuthoredEncounterWorldPosition(desiredPosition, out spawnPosition))
+            if (TryResolveExactEncounterWorldPosition(desiredPosition, out spawnPosition))
                 return true;
 
             if (m_Bootstrapper == null)
@@ -880,29 +897,10 @@ namespace VRCombat.Environment
             return false;
         }
 
-        bool TryResolveAuthoredEncounterWorldPosition(Vector3 desiredWorldPosition, out Vector3 spawnPosition)
+        bool TryResolveExactEncounterWorldPosition(Vector3 desiredWorldPosition, out Vector3 spawnPosition)
         {
-            if (m_Bootstrapper != null)
-            {
-                if (m_Bootstrapper.TryResolveLooseGroundSpawnPosition(
-                        desiredWorldPosition,
-                        GoblinSpawnCapsuleRadius,
-                        GoblinSpawnCapsuleHeight,
-                        out spawnPosition))
-                {
-                    m_Bootstrapper.ReserveEncounterSpace(spawnPosition, 6f, 3f, 6f);
-                    return true;
-                }
-            }
-
-            if (m_Bootstrapper == null)
-            {
-                spawnPosition = ResolveGroundedSpawnPosition(desiredWorldPosition);
-                return true;
-            }
-
-            spawnPosition = default;
-            return false;
+            spawnPosition = ResolveGroundedSpawnPosition(desiredWorldPosition);
+            return m_Bootstrapper == null || HasEncounterSpawnClearance(spawnPosition);
         }
 
         Vector3 ResolveGroundedSpawnPosition(Vector3 desiredWorldPosition)
@@ -920,6 +918,105 @@ namespace VRCombat.Environment
             }
 
             return desiredWorldPosition;
+        }
+
+        bool HasEncounterSpawnClearance(Vector3 rootPosition)
+        {
+            var radius = Mathf.Max(0.05f, GoblinSpawnCapsuleRadius + 0.02f);
+            var height = Mathf.Max(radius * 2f + 0.1f, GoblinSpawnCapsuleHeight);
+            var cylindricalHeight = Mathf.Max(0.01f, height - radius * 2f);
+            var bottom = rootPosition + Vector3.up * (radius + 0.02f);
+            var top = bottom + Vector3.up * cylindricalHeight;
+            var overlapCount = Physics.OverlapCapsuleNonAlloc(
+                bottom,
+                top,
+                radius,
+                PhysicsBufferCache.SpawnClearanceBuffer,
+                ~0,
+                QueryTriggerInteraction.Ignore);
+
+            for (var i = 0; i < overlapCount; i++)
+            {
+                var collider = PhysicsBufferCache.SpawnClearanceBuffer[i];
+                if (collider == null || !collider.enabled || collider.isTrigger)
+                    continue;
+
+                if (collider == m_StartTrigger)
+                    continue;
+
+                if (collider.bounds.max.y <= rootPosition.y + 0.06f)
+                    continue;
+
+                var colliderEncounter = collider.GetComponentInParent<ArenaOpeningEncounter>();
+                if (colliderEncounter == this ||
+                    collider.GetComponentInParent<TriggerSpawner>() != null ||
+                    collider.GetComponentInParent<UnityEngine.XR.Interaction.Toolkit.Locomotion.Teleportation.TeleportationArea>() != null)
+                {
+                    continue;
+                }
+
+                return false;
+            }
+
+            return true;
+        }
+
+        static Vector3 GetResolvedEncounterSpawnLocalPosition(
+            IReadOnlyList<GoblinSpawnEntry> goblinGroup,
+            int entryIndex,
+            Vector3 localPosition)
+        {
+            if (goblinGroup == null || goblinGroup.Count == 0)
+                return localPosition;
+
+            var duplicateCount = 0;
+            var duplicateIndex = 0;
+            for (var i = 0; i < goblinGroup.Count; i++)
+            {
+                if (!ApproximatelySameLocalPosition(goblinGroup[i].localPosition, localPosition))
+                    continue;
+
+                if (i < entryIndex)
+                    duplicateIndex++;
+                duplicateCount++;
+            }
+
+            if (duplicateCount <= 1 || duplicateIndex <= 0)
+                return localPosition;
+
+            var duplicateOffset = GetDuplicateSpawnOffset(duplicateIndex - 1, duplicateCount - 1);
+            return localPosition + duplicateOffset;
+        }
+
+        static Vector3 GetDuplicateSpawnOffset(int duplicateIndex, int duplicateCount)
+        {
+            if (duplicateIndex < 0 || duplicateCount <= 0)
+                return Vector3.zero;
+
+            var ringIndex = duplicateIndex / DuplicateSpawnRingCapacity;
+            var entriesBeforeRing = ringIndex * DuplicateSpawnRingCapacity;
+            var entriesInRing = Mathf.Min(DuplicateSpawnRingCapacity, duplicateCount - entriesBeforeRing);
+            var indexInRing = duplicateIndex - entriesBeforeRing;
+            var angle = entriesInRing <= 1 ? 0f : indexInRing * (360f / entriesInRing);
+            var radius = DuplicateSpawnSeparationRadius * (ringIndex + 1);
+            return Quaternion.Euler(0f, angle, 0f) * (Vector3.forward * radius);
+        }
+
+        bool UsesAuthoredEncounterGroup(IReadOnlyList<GoblinSpawnEntry> goblinGroup)
+        {
+            return goblinGroup != null &&
+                   m_GoblinGroup != null &&
+                   ReferenceEquals(goblinGroup, m_GoblinGroup);
+        }
+
+        static bool ApproximatelySameLocalPosition(Vector3 a, Vector3 b)
+        {
+            return (a - b).sqrMagnitude <= 0.0001f;
+        }
+
+        static class PhysicsBufferCache
+        {
+            internal static readonly Collider[] SpawnClearanceBuffer = new Collider[16];
         }
 
         static Transform FindDescendantByName(Transform root, string expectedName)

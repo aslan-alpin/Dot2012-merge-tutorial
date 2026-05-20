@@ -6,12 +6,15 @@ using System.Text;
 using Meta.XR.BuildingBlocks;
 using UnityEngine;
 using UnityEngine.Events;
+using UnityEngine.Rendering;
+using UnityEngine.Rendering.Universal;
 using Unity.XR.CoreUtils;
 using UnityEngine.XR;
 using UnityEngine.XR.Interaction.Toolkit;
 using UnityEngine.XR.Interaction.Toolkit.Filtering;
 using UnityEngine.XR.Interaction.Toolkit.Interactables;
 using UnityEngine.XR.Interaction.Toolkit.Samples.Hands;
+using UnityEngine.XR.Interaction.Toolkit.Samples.StarterAssets;
 using UnityEngine.XR.Interaction.Toolkit.Locomotion;
 using UnityEngine.XR.Interaction.Toolkit.Inputs;
 using UnityEngine.XR.Interaction.Toolkit.Locomotion.Comfort;
@@ -37,6 +40,14 @@ namespace VRCombat.Core
             Right
         }
 
+        enum DebugComboDirection
+        {
+            Up,
+            Down,
+            Left,
+            Right
+        }
+
         struct BladePickupLayout
         {
             public Vector3 GripColliderCenter;
@@ -46,6 +57,14 @@ namespace VRCombat.Core
             public float BodyColliderHeight;
             public float BodyColliderRadius;
             public Vector3 AttachLocalPosition;
+        }
+
+        struct ShieldPickupLayout
+        {
+            public Vector3 ColliderCenter;
+            public Vector3 ColliderSize;
+            public Vector3 AttachLocalPosition;
+            public Quaternion AttachLocalRotation;
         }
 
         enum BladeGripEnd
@@ -181,7 +200,9 @@ namespace VRCombat.Core
         readonly List<GameObject> m_RuntimeSpawnedObjects = new List<GameObject>();
         readonly List<CardTableRuntime> m_RuntimeCardTables = new List<CardTableRuntime>();
         readonly List<Collider> m_ArenaSurfaceColliders = new List<Collider>();
+        readonly List<Collider> m_ArenaPlatformSurfaceColliders = new List<Collider>();
         readonly Dictionary<XRGrabInteractable, HandSide> m_EquippedHandByPickup = new Dictionary<XRGrabInteractable, HandSide>();
+        readonly Dictionary<XRGrabInteractable, Dictionary<Transform, int>> m_HeldPickupOriginalLayers = new Dictionary<XRGrabInteractable, Dictionary<Transform, int>>();
         readonly HashSet<XRGrabInteractable> m_CombatPickupListenerRegistrations = new HashSet<XRGrabInteractable>();
         readonly List<Behaviour> m_ManagedLocomotionBehaviours = new List<Behaviour>();
         readonly Dictionary<Behaviour, bool> m_LocomotionDefaultEnabledStates = new Dictionary<Behaviour, bool>();
@@ -198,8 +219,8 @@ namespace VRCombat.Core
         static readonly List<XRInputDevice> s_ControllerDeviceBuffer = new List<XRInputDevice>(4);
         static readonly RaycastHit[] s_ScenePickupSupportHits = new RaycastHit[16];
         static readonly RaycastHit[] s_PlayerGroundHitBuffer = new RaycastHit[16];
-        static readonly RaycastHit[] s_ArenaSurfaceHitBuffer = new RaycastHit[24];
-        static readonly Collider[] s_SpawnClearanceBuffer = new Collider[24];
+        static readonly RaycastHit[] s_ArenaSurfaceHitBuffer = new RaycastHit[96];
+        static readonly Collider[] s_SpawnClearanceBuffer = new Collider[96];
         Coroutine m_DeathFlowRoutine;
         Vector3 m_KillZoneCenter;
         bool m_HasKillZoneCenter;
@@ -218,14 +239,24 @@ namespace VRCombat.Core
         bool m_IsRestarting;
         bool m_IsWaitingForEncounterResume;
         bool m_IsPauseMenuOpen;
+        bool m_IsVictoryMenuOpen;
         bool m_HasLoggedPauseStartupDiagnostics;
         bool m_HasLoggedFirstPauseAttempt;
         bool m_HasLoggedCameraRecoveryAttempt;
         bool m_RunStarted;
         bool m_HasStartedWaveLoop;
+        bool m_EndlessModeActive;
+        bool m_HasShownVictoryChoice;
+        bool m_ShouldContinueAfterVictory;
+        bool m_HasLoggedWavePlatformSpawnFailure;
+        bool m_UsesAuthoredEncounterProgression;
         bool m_LastUpgradeSelectionActive;
         bool m_HasGrantedIntroChainWeapon;
         float m_SpawnProtectionUntilTime;
+        int m_DebugMenuComboIndex;
+        float m_LastDebugMenuComboInputTime = -100f;
+        bool m_WasXrDebugComboAxisPressed;
+        DebugComboDirection m_LastXrDebugComboAxisDirection;
         bool m_WasRawMenuButtonPressed;
         bool m_PendingMetaMenuGesture;
         float m_BootstrapStartedRealtime;
@@ -239,6 +270,24 @@ namespace VRCombat.Core
 
         static readonly int BaseColorShaderId = Shader.PropertyToID("_BaseColor");
         static readonly int ColorShaderId = Shader.PropertyToID("_Color");
+        static readonly string[] s_PlatformSpawnRejectedNameTokens =
+        {
+            "corridor",
+            "hall",
+            "gate",
+            "wall",
+            "door",
+            "bridge",
+            "stair",
+            "ramp",
+            "pillar",
+            "column",
+            "ceiling",
+            "trigger",
+            "helper",
+            "lock",
+            "padlock"
+        };
         static readonly string[] s_LegacyArenaPickupNames =
         {
             "sword",
@@ -269,6 +318,7 @@ namespace VRCombat.Core
         const string ChainModelResourcePath = "CombatModels/Chain_03";
         const string FlintlockModelResourcePath = "CombatModels/Flintlock";
         const string GoblinModelResourcePath = "CombatModels/Goblin";
+        const string BossGoblinModelResourcePath = "CombatModels/HobGoblin";
         const string MaceModelResourcePath = "CombatModels/gurz1";
         const string ShieldModelResourcePath = "CombatModels/shield";
         const string SpearModelResourcePath = "CombatModels/spear";
@@ -313,12 +363,35 @@ namespace VRCombat.Core
         const float PlayerKillZoneExpansionAbovePadding = 3f;
         const float PlayerKillZoneMaxGroundDrop = 2.5f;
         const float PlayerKillZoneMaxGroundSlopeAngle = 75f;
-        static readonly int[] s_WaveEncounterMilestones = { 5, 10, 15 };
+        const string RuntimeOutdoorSunName = "Runtime Outdoor Sun";
+        const string ArenaPrimaryPlatformObjectName = "Platform";
+        const int BossWaveNumber = 15;
+        const float BossGoblinTargetHeight = 3.2f;
+        const float BossGoblinCapsuleRadius = 0.72f;
+        const float BossGoblinCapsuleHeight = 3.2f;
+        const float RuntimeOutdoorShadowDistance = 90f;
+        const float DebugMenuComboTimeoutSeconds = 2f;
+        static readonly int[] s_WaveEncounterMilestones = { 5, 10 };
+        static readonly DebugComboDirection[] s_DebugMenuComboSequence =
+        {
+            DebugComboDirection.Up,
+            DebugComboDirection.Up,
+            DebugComboDirection.Down,
+            DebugComboDirection.Down,
+            DebugComboDirection.Left,
+            DebugComboDirection.Right,
+            DebugComboDirection.Left,
+            DebugComboDirection.Right
+        };
+        static readonly string[] s_ArenaPlatformObjectNames =
+        {
+            ArenaPrimaryPlatformObjectName
+        };
 
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
         static void EnsureBootstrapperExists()
         {
-            RenderSettings.fog = false;
+            ConfigureSceneLighting();
 
             if (FindAnyObjectByType<VRCombatBootstrapper>() != null)
                 return;
@@ -329,7 +402,92 @@ namespace VRCombat.Core
 
         void Awake()
         {
+            ConfigureSceneLighting();
+        }
+
+        static void ConfigureSceneLighting()
+        {
+            RenderSettings.ambientMode = AmbientMode.Trilight;
+            RenderSettings.ambientSkyColor = new Color(0.34f, 0.38f, 0.44f, 1f);
+            RenderSettings.ambientEquatorColor = new Color(0.27f, 0.25f, 0.22f, 1f);
+            RenderSettings.ambientGroundColor = new Color(0.18f, 0.17f, 0.15f, 1f);
+            RenderSettings.ambientIntensity = 0.88f;
+            RenderSettings.reflectionIntensity = 0.42f;
             RenderSettings.fog = false;
+
+            var keyLight = ResolvePrimaryDirectionalLight();
+            var createdRuntimeLight = false;
+            if (keyLight == null)
+            {
+                keyLight = CreateRuntimeDirectionalLight();
+                createdRuntimeLight = true;
+            }
+
+            ConfigurePrimaryDirectionalLight(keyLight, createdRuntimeLight);
+            RenderSettings.sun = keyLight;
+            ConfigureRuntimeShadowDistance();
+        }
+
+        static void ConfigureRuntimeShadowDistance()
+        {
+            QualitySettings.shadowDistance = Mathf.Max(QualitySettings.shadowDistance, RuntimeOutdoorShadowDistance);
+            if (GraphicsSettings.currentRenderPipeline is UniversalRenderPipelineAsset universalPipelineAsset)
+                universalPipelineAsset.shadowDistance = Mathf.Max(universalPipelineAsset.shadowDistance, RuntimeOutdoorShadowDistance);
+        }
+
+        static Light ResolvePrimaryDirectionalLight()
+        {
+            if (RenderSettings.sun != null && RenderSettings.sun.type == LightType.Directional)
+                return RenderSettings.sun;
+
+            var lights = FindObjectsByType<Light>(FindObjectsInactive.Exclude, FindObjectsSortMode.None);
+            Light fallbackDirectional = null;
+            for (var i = 0; i < lights.Length; i++)
+            {
+                var light = lights[i];
+                if (light == null || light.type != LightType.Directional)
+                    continue;
+
+                if (fallbackDirectional == null)
+                    fallbackDirectional = light;
+
+                if (light.enabled && light.gameObject.activeInHierarchy)
+                    return light;
+            }
+
+            return fallbackDirectional;
+        }
+
+        static Light CreateRuntimeDirectionalLight()
+        {
+            var lightObject = new GameObject(RuntimeOutdoorSunName);
+            return lightObject.AddComponent<Light>();
+        }
+
+        static void ConfigurePrimaryDirectionalLight(Light keyLight, bool createdRuntimeLight)
+        {
+            if (keyLight == null)
+                return;
+
+            keyLight.enabled = true;
+            keyLight.type = LightType.Directional;
+            if (createdRuntimeLight)
+            {
+                keyLight.color = new Color(1f, 0.95f, 0.84f, 1f);
+                keyLight.intensity = 1.45f;
+                keyLight.transform.rotation = Quaternion.Euler(55f, -36f, 6f);
+            }
+            else
+            {
+                keyLight.intensity = Mathf.Clamp(keyLight.intensity <= 0f ? 1.45f : keyLight.intensity, 1.15f, 1.6f);
+                if (keyLight.color.maxColorComponent <= 0.01f)
+                    keyLight.color = new Color(1f, 0.95f, 0.84f, 1f);
+            }
+
+            keyLight.shadows = LightShadows.Soft;
+            keyLight.shadowStrength = Mathf.Clamp(keyLight.shadowStrength <= 0f ? 0.48f : keyLight.shadowStrength, 0.32f, 0.58f);
+            keyLight.bounceIntensity = Mathf.Clamp(keyLight.bounceIntensity <= 0f ? 1.05f : keyLight.bounceIntensity, 0.95f, 1.25f);
+            keyLight.renderMode = LightRenderMode.ForcePixel;
         }
 
         IEnumerator Start()
@@ -339,6 +497,7 @@ namespace VRCombat.Core
                 yield return null;
 
             EnablePlayerControls();
+            ConfigureControllerLocomotionActionManagers();
             SetupPlayerDamageDetection();
             SetupMovementVignetteControl();
             ConfigureHandFirstInteraction();
@@ -355,10 +514,13 @@ namespace VRCombat.Core
             UpdateControllerFallbackHandMapping();
             MonitorUpgradePauseState();
 
-            if (!m_IsGameOver && !m_IsRestarting)
+            if (!m_IsGameOver && !m_IsRestarting && !m_IsVictoryMenuOpen)
             {
                 if (Input.GetKeyDown(KeyCode.Escape) || ConsumeMenuButtonPress())
                     RequestPauseMenuToggle();
+
+                if (m_IsPauseMenuOpen)
+                    UpdatePauseMenuShortcuts();
             }
 
             UpdateKillZoneState();
@@ -389,6 +551,7 @@ namespace VRCombat.Core
             UnbindMetaMenuGestureDetector();
             if (m_RuntimePauseMenuAction != null)
             {
+                m_RuntimePauseMenuAction.performed -= OnRuntimePauseMenuActionPerformed;
                 m_RuntimePauseMenuAction.Disable();
                 m_RuntimePauseMenuAction.Dispose();
                 m_RuntimePauseMenuAction = null;
@@ -409,6 +572,19 @@ namespace VRCombat.Core
             {
                 asset.Enable();
                 Debug.Log($"[VRCombat] Enabled input action asset '{asset.name}'");
+            }
+        }
+
+        void ConfigureControllerLocomotionActionManagers()
+        {
+            if (m_PlayerRoot == null)
+                return;
+
+            var actionManagers = m_PlayerRoot.GetComponentsInChildren<ControllerInputActionManager>(true);
+            for (var i = 0; i < actionManagers.Length; i++)
+            {
+                if (actionManagers[i] != null)
+                    actionManagers[i].allowTeleportWithSmoothMotion = true;
             }
         }
 
@@ -1285,6 +1461,9 @@ namespace VRCombat.Core
             if (allowedColliders == null || allowedColliders.Count == 0)
                 return false;
 
+            if (TryRaycastAllowedArenaColliders(origin, distance, allowedColliders, maxSurfaceY, out bestHit))
+                return true;
+
             var hitCount = Physics.RaycastNonAlloc(
                 origin,
                 Vector3.down,
@@ -1305,6 +1484,50 @@ namespace VRCombat.Core
                     continue;
 
                 if (collider.GetComponentInParent<XRBaseInteractable>() != null || collider.GetComponentInParent<XRGrabInteractable>() != null)
+                    continue;
+
+                if (hit.normal.y < ArenaGroundSnapNormalThreshold)
+                    continue;
+
+                if (hit.point.y > maxSurfaceY)
+                    continue;
+
+                if (hit.distance >= closestDistance)
+                    continue;
+
+                closestDistance = hit.distance;
+                bestHit = hit;
+            }
+
+            return closestDistance < float.PositiveInfinity;
+        }
+
+        bool TryRaycastAllowedArenaColliders(
+            Vector3 origin,
+            float distance,
+            IReadOnlyList<Collider> allowedColliders,
+            float maxSurfaceY,
+            out RaycastHit bestHit)
+        {
+            bestHit = default;
+            if (allowedColliders == null || allowedColliders.Count == 0)
+                return false;
+
+            var ray = new Ray(origin, Vector3.down);
+            var closestDistance = float.PositiveInfinity;
+            for (var i = 0; i < allowedColliders.Count; i++)
+            {
+                var collider = allowedColliders[i];
+                if (collider == null || !collider.enabled || collider.isTrigger)
+                    continue;
+
+                if (m_PlayerRoot != null && collider.transform.IsChildOf(m_PlayerRoot))
+                    continue;
+
+                if (collider.GetComponentInParent<XRBaseInteractable>() != null || collider.GetComponentInParent<XRGrabInteractable>() != null)
+                    continue;
+
+                if (!collider.Raycast(ray, out var hit, distance))
                     continue;
 
                 if (hit.normal.y < ArenaGroundSnapNormalThreshold)
@@ -1527,6 +1750,7 @@ namespace VRCombat.Core
         {
             var runtimeActionPressed = ReadRuntimePauseMenuActionDown();
             var rawMenuPressed = ReadRawMenuButtonDown()
+                || ReadOvrPauseButtonDown()
                 || ReadGenericInputSystemPauseButtonDown()
                 || ConsumeMetaMenuGesturePress();
 #if DEVELOPMENT_BUILD || UNITY_EDITOR
@@ -1537,7 +1761,7 @@ namespace VRCombat.Core
 
         void RequestPauseMenuToggle()
         {
-            if (m_IsGameOver || m_IsRestarting)
+            if (m_IsGameOver || m_IsRestarting || m_IsVictoryMenuOpen)
                 return;
 
             if (Time.unscaledTime - m_LastPauseToggleTime < PauseToggleDebounceSeconds)
@@ -1545,6 +1769,214 @@ namespace VRCombat.Core
 
             m_LastPauseToggleTime = Time.unscaledTime;
             SetPauseMenuOpen(!m_IsPauseMenuOpen);
+        }
+
+        void UpdatePauseMenuShortcuts()
+        {
+            if (WasPauseRestartShortcutPressedThisFrame())
+            {
+                RestartCurrentScene();
+                return;
+            }
+
+            if (UpdateDebugMenuComboShortcut())
+                return;
+
+            var vignetteStep = ReadPauseVignetteStepThisFrame();
+            if (!Mathf.Approximately(vignetteStep, 0f))
+                m_CombatHud?.AdjustPauseMenuVignette(vignetteStep);
+        }
+
+        bool UpdateDebugMenuComboShortcut()
+        {
+            if (!m_IsPauseMenuOpen || m_CombatHud == null)
+            {
+                m_DebugMenuComboIndex = 0;
+                return false;
+            }
+
+            if (!TryReadDebugComboDirectionThisFrame(out var direction))
+                return false;
+
+            if (Time.unscaledTime - m_LastDebugMenuComboInputTime > DebugMenuComboTimeoutSeconds)
+                m_DebugMenuComboIndex = 0;
+
+            m_LastDebugMenuComboInputTime = Time.unscaledTime;
+            var expectedDirection = s_DebugMenuComboSequence[m_DebugMenuComboIndex];
+            if (direction == expectedDirection)
+            {
+                m_DebugMenuComboIndex++;
+                if (m_DebugMenuComboIndex < s_DebugMenuComboSequence.Length)
+                    return false;
+
+                m_DebugMenuComboIndex = 0;
+                m_CombatHud.ToggleDebugPanel();
+                m_CombatHud.ShowBanner("Debug menu", 0.8f);
+                return true;
+            }
+
+            m_DebugMenuComboIndex = direction == s_DebugMenuComboSequence[0] ? 1 : 0;
+            return false;
+        }
+
+        bool TryReadDebugComboDirectionThisFrame(out DebugComboDirection direction)
+        {
+            direction = DebugComboDirection.Up;
+            var keyboard = Keyboard.current;
+            if (Input.GetKeyDown(KeyCode.UpArrow) ||
+                Input.GetKeyDown(KeyCode.W) ||
+                (keyboard != null && (keyboard.upArrowKey.wasPressedThisFrame || keyboard.wKey.wasPressedThisFrame)))
+            {
+                direction = DebugComboDirection.Up;
+                return true;
+            }
+
+            if (Input.GetKeyDown(KeyCode.DownArrow) ||
+                Input.GetKeyDown(KeyCode.S) ||
+                (keyboard != null && (keyboard.downArrowKey.wasPressedThisFrame || keyboard.sKey.wasPressedThisFrame)))
+            {
+                direction = DebugComboDirection.Down;
+                return true;
+            }
+
+            if (Input.GetKeyDown(KeyCode.LeftArrow) ||
+                Input.GetKeyDown(KeyCode.A) ||
+                (keyboard != null && (keyboard.leftArrowKey.wasPressedThisFrame || keyboard.aKey.wasPressedThisFrame)))
+            {
+                direction = DebugComboDirection.Left;
+                return true;
+            }
+
+            if (Input.GetKeyDown(KeyCode.RightArrow) ||
+                Input.GetKeyDown(KeyCode.D) ||
+                (keyboard != null && (keyboard.rightArrowKey.wasPressedThisFrame || keyboard.dKey.wasPressedThisFrame)))
+            {
+                direction = DebugComboDirection.Right;
+                return true;
+            }
+
+            var gamepad = Gamepad.current;
+            if (gamepad == null)
+                return TryReadXrDebugComboDirection(out direction);
+
+            if (gamepad.dpad.up.wasPressedThisFrame || gamepad.leftStick.up.wasPressedThisFrame)
+            {
+                direction = DebugComboDirection.Up;
+                return true;
+            }
+
+            if (gamepad.dpad.down.wasPressedThisFrame || gamepad.leftStick.down.wasPressedThisFrame)
+            {
+                direction = DebugComboDirection.Down;
+                return true;
+            }
+
+            if (gamepad.dpad.left.wasPressedThisFrame || gamepad.leftStick.left.wasPressedThisFrame)
+            {
+                direction = DebugComboDirection.Left;
+                return true;
+            }
+
+            if (gamepad.dpad.right.wasPressedThisFrame || gamepad.leftStick.right.wasPressedThisFrame)
+            {
+                direction = DebugComboDirection.Right;
+                return true;
+            }
+
+            return TryReadXrDebugComboDirection(out direction);
+        }
+
+        bool TryReadXrDebugComboDirection(out DebugComboDirection direction)
+        {
+            if (!TryReadDominantXrThumbstickDirection(out direction))
+            {
+                m_WasXrDebugComboAxisPressed = false;
+                return false;
+            }
+
+            if (m_WasXrDebugComboAxisPressed && direction == m_LastXrDebugComboAxisDirection)
+                return false;
+
+            m_WasXrDebugComboAxisPressed = true;
+            m_LastXrDebugComboAxisDirection = direction;
+            return true;
+        }
+
+        static bool TryReadDominantXrThumbstickDirection(out DebugComboDirection direction)
+        {
+            direction = DebugComboDirection.Up;
+            var bestMagnitude = 0.68f;
+            var foundDirection = false;
+
+            TryReadDominantXrThumbstickDirectionForNode(XRNode.LeftHand, ref direction, ref bestMagnitude, ref foundDirection);
+            TryReadDominantXrThumbstickDirectionForNode(XRNode.RightHand, ref direction, ref bestMagnitude, ref foundDirection);
+            return foundDirection;
+        }
+
+        static void TryReadDominantXrThumbstickDirectionForNode(
+            XRNode node,
+            ref DebugComboDirection direction,
+            ref float bestMagnitude,
+            ref bool foundDirection)
+        {
+            s_ControllerDeviceBuffer.Clear();
+            InputDevices.GetDevicesAtXRNode(node, s_ControllerDeviceBuffer);
+            for (var i = 0; i < s_ControllerDeviceBuffer.Count; i++)
+            {
+                var device = s_ControllerDeviceBuffer[i];
+                if (!device.isValid || !device.TryGetFeatureValue(XRCommonUsages.primary2DAxis, out var axis))
+                    continue;
+
+                var horizontal = Mathf.Abs(axis.x);
+                var vertical = Mathf.Abs(axis.y);
+                var magnitude = Mathf.Max(horizontal, vertical);
+                if (magnitude <= bestMagnitude)
+                    continue;
+
+                bestMagnitude = magnitude;
+                foundDirection = true;
+                if (vertical >= horizontal)
+                    direction = axis.y >= 0f ? DebugComboDirection.Up : DebugComboDirection.Down;
+                else
+                    direction = axis.x >= 0f ? DebugComboDirection.Right : DebugComboDirection.Left;
+            }
+        }
+
+        static bool WasPauseRestartShortcutPressedThisFrame()
+        {
+            return Input.GetKeyDown(KeyCode.R) ||
+                   (Keyboard.current != null && Keyboard.current.rKey.wasPressedThisFrame) ||
+                   (Gamepad.current != null && Gamepad.current.buttonNorth.wasPressedThisFrame);
+        }
+
+        static float ReadPauseVignetteStepThisFrame()
+        {
+            const float step = 0.1f;
+            var keyboard = Keyboard.current;
+            if (Input.GetKeyDown(KeyCode.LeftArrow) ||
+                Input.GetKeyDown(KeyCode.A) ||
+                (keyboard != null && (keyboard.leftArrowKey.wasPressedThisFrame || keyboard.aKey.wasPressedThisFrame)))
+            {
+                return -step;
+            }
+
+            if (Input.GetKeyDown(KeyCode.RightArrow) ||
+                Input.GetKeyDown(KeyCode.D) ||
+                (keyboard != null && (keyboard.rightArrowKey.wasPressedThisFrame || keyboard.dKey.wasPressedThisFrame)))
+            {
+                return step;
+            }
+
+            var gamepad = Gamepad.current;
+            if (gamepad == null)
+                return 0f;
+
+            if (gamepad.dpad.left.wasPressedThisFrame || gamepad.leftStick.left.wasPressedThisFrame)
+                return -step;
+            if (gamepad.dpad.right.wasPressedThisFrame || gamepad.leftStick.right.wasPressedThisFrame)
+                return step;
+
+            return 0f;
         }
 
         void SetupPauseMenuInputActions()
@@ -1555,45 +1987,86 @@ namespace VRCombat.Core
                     "Runtime Pause Menu",
                     UnityEngine.InputSystem.InputActionType.Button);
 
-                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<XRController>{LeftHand}/menu");
-                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<XRController>{LeftHand}/menuButton");
-                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<XRController>{LeftHand}/systemButton");
-                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<XRController>{LeftHand}/start");
-                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<OculusTouchController>{LeftHand}/menu");
-                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<OculusTouchController>{LeftHand}/menuButton");
-                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<OculusTouchController>{LeftHand}/systemButton");
-                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<OculusTouchController>{LeftHand}/start");
-                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<QuestTouchPlusController>{LeftHand}/menu");
-                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<QuestTouchPlusController>{LeftHand}/menuButton");
-                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<QuestTouchPlusController>{LeftHand}/systemButton");
-                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<QuestTouchPlusController>{LeftHand}/start");
-                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<QuestProTouchController>{LeftHand}/menu");
-                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<QuestProTouchController>{LeftHand}/menuButton");
-                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<QuestProTouchController>{LeftHand}/systemButton");
-                // Quest 3 Touch Plus specific - secondaryButton is the hamburger/menu button on left controller
-                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<XRController>{LeftHand}/secondaryButton");
-                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<OculusTouchController>{LeftHand}/secondaryButton");
-                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<QuestTouchPlusController>{LeftHand}/secondaryButton");
-                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<MetaQuestTouchPlusController>{LeftHand}/menu");
-                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<MetaQuestTouchPlusController>{LeftHand}/menuButton");
-                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<MetaQuestTouchPlusController>{LeftHand}/secondaryButton");
-                // Thumbstick click fallback
-                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<XRController>{LeftHand}/primary2DAxisClick");
-                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<XRController>{LeftHand}/thumbstickClicked");
-                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<OculusTouchController>{LeftHand}/primary2DAxisClick");
-                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<OculusTouchController>{LeftHand}/thumbstickClicked");
-                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<QuestTouchPlusController>{LeftHand}/primary2DAxisClick");
-                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<QuestTouchPlusController>{LeftHand}/thumbstickClicked");
-                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<QuestProTouchController>{LeftHand}/primary2DAxisClick");
-                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(m_RuntimePauseMenuAction, "<QuestProTouchController>{LeftHand}/thumbstickClicked");
+                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(
+                    m_RuntimePauseMenuAction,
+                    "<Keyboard>/escape");
+                UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(
+                    m_RuntimePauseMenuAction,
+                    "<Gamepad>/startButton");
+
+                var controllerLayouts = new[]
+                {
+                    "XRController",
+                    "OculusTouchController",
+                    "QuestTouchPlusController",
+                    "QuestProTouchController",
+                    "MetaQuestTouchPlusController"
+                };
+                var handUsages = new[] { "LeftHand", "RightHand" };
+                var menuControls = new[] { "menu", "menuButton", "systemButton", "start", "startButton", "secondaryButton" };
+                var thumbstickControls = new[] { "primary2DAxisClick", "thumbstickClicked", "joystickClicked" };
+
+                for (var layoutIndex = 0; layoutIndex < controllerLayouts.Length; layoutIndex++)
+                {
+                    var layout = controllerLayouts[layoutIndex];
+                    for (var controlIndex = 0; controlIndex < menuControls.Length; controlIndex++)
+                    {
+                        UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(
+                            m_RuntimePauseMenuAction,
+                            $"<{layout}>/{menuControls[controlIndex]}");
+                    }
+
+                    for (var controlIndex = 0; controlIndex < thumbstickControls.Length; controlIndex++)
+                    {
+                        UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(
+                            m_RuntimePauseMenuAction,
+                            $"<{layout}>/{thumbstickControls[controlIndex]}");
+                    }
+
+                    for (var handIndex = 0; handIndex < handUsages.Length; handIndex++)
+                    {
+                        var handUsage = handUsages[handIndex];
+                        for (var controlIndex = 0; controlIndex < menuControls.Length; controlIndex++)
+                        {
+                            UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(
+                                m_RuntimePauseMenuAction,
+                                $"<{layout}>{{{handUsage}}}/{menuControls[controlIndex]}");
+                        }
+
+                        for (var controlIndex = 0; controlIndex < thumbstickControls.Length; controlIndex++)
+                        {
+                            UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(
+                                m_RuntimePauseMenuAction,
+                                $"<{layout}>{{{handUsage}}}/{thumbstickControls[controlIndex]}");
+                        }
+                    }
+                }
+
+                // Quest Touch Plus reports the hamburger/menu button as secondaryButton on the left controller.
+                for (var layoutIndex = 0; layoutIndex < controllerLayouts.Length; layoutIndex++)
+                {
+                    UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(
+                        m_RuntimePauseMenuAction,
+                        $"<{controllerLayouts[layoutIndex]}>{{LeftHand}}/secondaryButton");
+                }
             }
 
+            m_RuntimePauseMenuAction.performed -= OnRuntimePauseMenuActionPerformed;
+            m_RuntimePauseMenuAction.performed += OnRuntimePauseMenuActionPerformed;
             if (!m_RuntimePauseMenuAction.enabled)
                 m_RuntimePauseMenuAction.Enable();
 
             ConfigureMetaControllerButtonsMapperPauseBinding();
             RebindMetaMenuGestureDetector();
             m_PendingMetaMenuGesture = false;
+        }
+
+        void OnRuntimePauseMenuActionPerformed(UnityEngine.InputSystem.InputAction.CallbackContext context)
+        {
+            if (!context.performed)
+                return;
+
+            RequestPauseMenuToggle();
         }
 
         void ConfigureMetaControllerButtonsMapperPauseBinding()
@@ -1680,7 +2153,7 @@ namespace VRCombat.Core
                 if (WasAnyMenuControlPressedThisFrame(device))
                     return true;
 
-                if (IsLikelyLeftHandInputSystemDevice(device) && WasAnyThumbstickPauseControlPressedThisFrame(device))
+                if (IsLikelyHandInputSystemDevice(device) && WasAnyThumbstickPauseControlPressedThisFrame(device))
                     return true;
             }
 
@@ -1726,16 +2199,17 @@ namespace VRCombat.Core
             return false;
         }
 
-        static bool IsLikelyLeftHandInputSystemDevice(UnityEngine.InputSystem.InputDevice device)
+        static bool IsLikelyHandInputSystemDevice(UnityEngine.InputSystem.InputDevice device)
         {
             if (device == null)
                 return false;
 
-            if (HasInputSystemUsage(device, "LeftHand"))
+            if (HasInputSystemUsage(device, "LeftHand") || HasInputSystemUsage(device, "RightHand"))
                 return true;
 
             var descriptor = $"{device.displayName} {device.name} {device.layout}";
-            return descriptor.IndexOf("left", StringComparison.OrdinalIgnoreCase) >= 0;
+            return descriptor.IndexOf("left", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   descriptor.IndexOf("right", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         bool ConsumeMetaMenuGesturePress()
@@ -1796,6 +2270,15 @@ namespace VRCombat.Core
                 || HasInputSystemButtonControl(device, "menuButton")
                 || HasInputSystemButtonControl(device, "systemButton")
                 || HasInputSystemButtonControl(device, "start");
+        }
+
+        static bool IsInputSystemPauseButtonPressed(UnityEngine.InputSystem.InputDevice device)
+        {
+            return IsInputSystemButtonPressed(device, "menu")
+                || IsInputSystemButtonPressed(device, "menuButton")
+                || IsInputSystemButtonPressed(device, "systemButton")
+                || IsInputSystemButtonPressed(device, "start")
+                || IsInputSystemPauseFallbackPressed(device);
         }
 
         static bool IsInputSystemPauseFallbackPressed(UnityEngine.InputSystem.InputDevice device)
@@ -1859,6 +2342,26 @@ namespace VRCombat.Core
             return isPressed && !wasPressed;
         }
 
+        static bool ReadOvrPauseButtonDown()
+        {
+            try
+            {
+                return OVRInput.GetDown(OVRInput.Button.Start) ||
+                       OVRInput.GetDown(OVRInput.RawButton.Start) ||
+                       OVRInput.GetDown(OVRInput.Button.Three, OVRInput.Controller.LTouch) ||
+                       OVRInput.GetDown(OVRInput.RawButton.Y) ||
+                       OVRInput.GetDown(OVRInput.Button.Two, OVRInput.Controller.LTouch) ||
+                       OVRInput.GetDown(OVRInput.Button.PrimaryThumbstick) ||
+                       OVRInput.GetDown(OVRInput.Button.SecondaryThumbstick) ||
+                       OVRInput.GetDown(OVRInput.RawButton.LThumbstick) ||
+                       OVRInput.GetDown(OVRInput.RawButton.RThumbstick);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         bool IsRawMenuButtonPressed()
         {
             if (TryGetResolvedControllerDevice(
@@ -1871,38 +2374,23 @@ namespace VRCombat.Core
                     return true;
             }
 
-            if (IsAnyMenuSpecificButtonPressed(
-                    InputDeviceCharacteristics.Left |
-                    InputDeviceCharacteristics.Controller |
-                    InputDeviceCharacteristics.TrackedDevice))
+            if (TryGetResolvedControllerDevice(
+                    InputDeviceCharacteristics.Right,
+                    XRNode.RightHand,
+                    m_RightControllerTransform,
+                    out var resolvedRightDevice))
             {
-                return true;
+                if (IsMenuSpecificButtonPressed(resolvedRightDevice) || IsPauseFallbackThumbstickPressed(resolvedRightDevice))
+                    return true;
             }
 
-            if (IsAnyPauseFallbackThumbstickPressed(
-                    InputDeviceCharacteristics.Left |
-                    InputDeviceCharacteristics.Controller |
-                    InputDeviceCharacteristics.TrackedDevice))
-            {
+            if (IsAnyXrPauseButtonPressedForHand(InputDeviceCharacteristics.Left) ||
+                IsAnyXrPauseButtonPressedForHand(InputDeviceCharacteristics.Right))
                 return true;
-            }
 
-            if (IsAnyMenuSpecificButtonPressed(
-                    InputDeviceCharacteristics.Left |
-                    InputDeviceCharacteristics.TrackedDevice))
-            {
+            if (IsInputSystemPauseButtonPressed(UnityEngine.InputSystem.XR.XRController.leftHand) ||
+                IsInputSystemPauseButtonPressed(UnityEngine.InputSystem.XR.XRController.rightHand))
                 return true;
-            }
-
-            var left = UnityEngine.InputSystem.XR.XRController.leftHand;
-            if (IsInputSystemButtonPressed(left, "menu")
-                || IsInputSystemButtonPressed(left, "menuButton")
-                || IsInputSystemButtonPressed(left, "systemButton")
-                || IsInputSystemButtonPressed(left, "start")
-                || IsInputSystemPauseFallbackPressed(left))
-            {
-                return true;
-            }
 
             var inputSystemDevices = UnityEngine.InputSystem.InputSystem.devices;
             for (var i = 0; i < inputSystemDevices.Count; i++)
@@ -1911,18 +2399,11 @@ namespace VRCombat.Core
                 if (device == null)
                     continue;
 
-                var descriptor = $"{device.displayName} {device.name} {device.layout}";
-                if (descriptor.IndexOf("left", StringComparison.OrdinalIgnoreCase) < 0)
+                if (!IsLikelyHandInputSystemDevice(device) && !HasInputSystemPauseMenuControl(device))
                     continue;
 
-                if (IsInputSystemButtonPressed(device, "menu")
-                    || IsInputSystemButtonPressed(device, "menuButton")
-                    || IsInputSystemButtonPressed(device, "systemButton")
-                    || IsInputSystemButtonPressed(device, "start")
-                    || IsInputSystemPauseFallbackPressed(device))
-                {
+                if (IsInputSystemPauseButtonPressed(device))
                     return true;
-                }
             }
 
             try
@@ -1942,7 +2423,9 @@ namespace VRCombat.Core
                     return true;
 
                 if (OVRInput.Get(OVRInput.Button.PrimaryThumbstick)
-                    || OVRInput.Get(OVRInput.RawButton.LThumbstick))
+                    || OVRInput.Get(OVRInput.Button.SecondaryThumbstick)
+                    || OVRInput.Get(OVRInput.RawButton.LThumbstick)
+                    || OVRInput.Get(OVRInput.RawButton.RThumbstick))
                 {
                     return true;
                 }
@@ -1965,6 +2448,30 @@ namespace VRCombat.Core
             }
 
             return false;
+        }
+
+        static bool IsAnyXrPauseButtonPressedForHand(InputDeviceCharacteristics handednessFlag)
+        {
+            var controllerCharacteristics =
+                handednessFlag |
+                InputDeviceCharacteristics.Controller |
+                InputDeviceCharacteristics.TrackedDevice;
+            if (IsAnyMenuSpecificButtonPressed(controllerCharacteristics) ||
+                IsAnyPauseFallbackThumbstickPressed(controllerCharacteristics))
+            {
+                return true;
+            }
+
+            var controllerOnlyCharacteristics = handednessFlag | InputDeviceCharacteristics.Controller;
+            if (IsAnyMenuSpecificButtonPressed(controllerOnlyCharacteristics) ||
+                IsAnyPauseFallbackThumbstickPressed(controllerOnlyCharacteristics))
+            {
+                return true;
+            }
+
+            var trackedOnlyCharacteristics = handednessFlag | InputDeviceCharacteristics.TrackedDevice;
+            return IsAnyMenuSpecificButtonPressed(trackedOnlyCharacteristics) ||
+                   IsAnyPauseFallbackThumbstickPressed(trackedOnlyCharacteristics);
         }
 
         static bool IsAnyPauseFallbackThumbstickPressed(InputDeviceCharacteristics desiredCharacteristics)
@@ -2310,10 +2817,17 @@ namespace VRCombat.Core
                 RestartCurrentScene,
                 QuitGame,
                 () => SetPauseMenuOpen(false),
+                ContinueEndlessMode,
                 SetMovementVignetteStrength,
                 m_MovementVignetteStrength,
                 m_PlayerCamera,
-                m_PlayerCamera.transform);
+                m_PlayerCamera.transform,
+                DebugGrantUpgrade,
+                DebugGrantWeapon,
+                DebugUnlockSpell,
+                DebugGrantAllWeapons,
+                DebugKillAllEnemies,
+                DebugSetWaveNumber);
 
             if (m_PlayerDamageReceiver == null)
                 return;
@@ -2377,6 +2891,9 @@ namespace VRCombat.Core
             for (var i = 0; i < sceneEncounters.Length; i++)
                 RegisterArenaEncounter(sceneEncounters[i], seenIds);
 
+            SortArenaEncountersForProgression();
+            m_UsesAuthoredEncounterProgression = CountActiveArenaEncounters() > 1;
+
             for (var i = 0; i < m_ArenaEncounters.Count; i++)
             {
                 var encounter = m_ArenaEncounters[i];
@@ -2419,11 +2936,60 @@ namespace VRCombat.Core
             m_ArenaEncounters.Add(encounter);
         }
 
+        void SortArenaEncountersForProgression()
+        {
+            var startPosition = GetResolvedRunStartHeadPosition();
+            m_ArenaEncounters.Sort((left, right) => CompareArenaEncounterProgressionOrder(left, right, startPosition));
+        }
+
+        int CountActiveArenaEncounters()
+        {
+            var activeCount = 0;
+            for (var i = 0; i < m_ArenaEncounters.Count; i++)
+            {
+                var encounter = m_ArenaEncounters[i];
+                if (encounter != null && encounter.isActiveAndEnabled)
+                    activeCount++;
+            }
+
+            return activeCount;
+        }
+
+        static int CompareArenaEncounterProgressionOrder(
+            ArenaOpeningEncounter left,
+            ArenaOpeningEncounter right,
+            Vector3 startPosition)
+        {
+            if (ReferenceEquals(left, right))
+                return 0;
+            if (left == null)
+                return 1;
+            if (right == null)
+                return -1;
+
+            var waveCompare = left.UnlockAfterWave.CompareTo(right.UnlockAfterWave);
+            if (waveCompare != 0)
+                return waveCompare;
+
+            var leftOffset = Vector3.ProjectOnPlane(left.transform.position - startPosition, Vector3.up);
+            var rightOffset = Vector3.ProjectOnPlane(right.transform.position - startPosition, Vector3.up);
+            var distanceCompare = leftOffset.sqrMagnitude.CompareTo(rightOffset.sqrMagnitude);
+            if (distanceCompare != 0)
+                return distanceCompare;
+
+            return string.Compare(left.name, right.name, StringComparison.OrdinalIgnoreCase);
+        }
+
         static bool ShouldAutoStartEncounter(ArenaOpeningEncounter encounter)
+        {
+            return ShouldAutoStartEncounter(encounter, maxUnlockAfterWave: 0);
+        }
+
+        static bool ShouldAutoStartEncounter(ArenaOpeningEncounter encounter, int maxUnlockAfterWave)
         {
             return encounter != null &&
                 encounter.StartMode == EncounterStartMode.AutoOnRunStart &&
-                encounter.UnlockAfterWave <= 0;
+                encounter.UnlockAfterWave <= Mathf.Max(0, maxUnlockAfterWave);
         }
 
         bool HasEncounterThatStartsOrResumesWaves()
@@ -2444,6 +3010,9 @@ namespace VRCombat.Core
 
         bool BeginAutoStartEncounters()
         {
+            if (m_UsesAuthoredEncounterProgression)
+                return BeginNextAuthoredEncounterAfter(null);
+
             var beganAny = false;
             for (var i = 0; i < m_ArenaEncounters.Count; i++)
             {
@@ -2460,6 +3029,50 @@ namespace VRCombat.Core
             }
 
             return beganAny;
+        }
+
+        bool BeginNextAuthoredEncounterAfter(ArenaOpeningEncounter completedEncounter)
+        {
+            var startIndex = 0;
+            if (completedEncounter != null)
+            {
+                var completedIndex = m_ArenaEncounters.IndexOf(completedEncounter);
+                startIndex = completedIndex >= 0 ? completedIndex + 1 : 0;
+            }
+
+            var maxUnlockAfterWave = GetAuthoredProgressionUnlockedWave(completedEncounter);
+            for (var i = startIndex; i < m_ArenaEncounters.Count; i++)
+            {
+                var encounter = m_ArenaEncounters[i];
+                if (encounter == null ||
+                    !encounter.isActiveAndEnabled ||
+                    encounter.HasBegun ||
+                    encounter.HasCompleted ||
+                    !ShouldAutoStartEncounter(encounter, maxUnlockAfterWave))
+                {
+                    continue;
+                }
+
+                encounter.BeginEncounter(this);
+                if (m_IsWaitingForEncounterResume &&
+                    (m_PendingWaveResumeEncounter == null || ReferenceEquals(m_PendingWaveResumeEncounter, completedEncounter)))
+                {
+                    m_PendingWaveResumeEncounter = encounter;
+                }
+
+                return true;
+            }
+
+            return false;
+        }
+
+        int GetAuthoredProgressionUnlockedWave(ArenaOpeningEncounter completedEncounter)
+        {
+            var unlockedWave = m_HasStartedWaveLoop ? m_CurrentWave : 0;
+            if (completedEncounter != null)
+                unlockedWave = Mathf.Max(unlockedWave, completedEncounter.UnlockAfterWave);
+
+            return Mathf.Max(0, unlockedWave);
         }
 
         bool HasPendingAutoStartEncounters()
@@ -2516,6 +3129,7 @@ namespace VRCombat.Core
                               !m_IsRestarting &&
                               !m_IsGameOver &&
                               !m_IsPauseMenuOpen &&
+                              !m_IsVictoryMenuOpen &&
                               (m_WristChainIntroController == null || !m_WristChainIntroController.IsActive) &&
                               (m_RunProgressionController == null || !m_RunProgressionController.IsUpgradeSelectionActive);
 
@@ -2692,7 +3306,10 @@ namespace VRCombat.Core
                 m_HasGrantedIntroChainWeapon = true;
             }
             if (m_SpawnLoop != null)
+            {
                 StopCoroutine(m_SpawnLoop);
+                m_SpawnLoop = null;
+            }
             m_CombatHud?.ShowBanner("Chains broken", 1.1f);
             RefreshManagedLocomotionBehaviours();
             ApplyPlayerSpeedMultiplier();
@@ -2701,15 +3318,18 @@ namespace VRCombat.Core
             RefreshRunInteractionState();
 
             ResolveArenaEncounters();
-            if (!HasEncounterThatStartsOrResumesWaves())
+            if (!m_UsesAuthoredEncounterProgression && !HasEncounterThatStartsOrResumesWaves())
             {
                 Debug.LogWarning(
-                    "[VRCombat] No encounter is configured to start or resume waves on completion. The wave loop will remain paused until one is authored.",
+                    "[VRCombat] No encounter is configured to start or resume waves on completion. Starting the runtime wave loop directly.",
                     this);
             }
 
             if (BeginAutoStartEncounters())
                 return;
+
+            if (!m_HasStartedWaveLoop)
+                StartWaveLoop();
         }
 
         void HandleArenaOpeningEncounterCompleted(ArenaOpeningEncounter encounter)
@@ -2717,10 +3337,53 @@ namespace VRCombat.Core
             if (m_IsRestarting || m_IsGameOver || !m_RunStarted || encounter == null)
                 return;
 
+            if (m_UsesAuthoredEncounterProgression)
+            {
+                m_PlayerDamageReceiver?.RestoreFullHealth();
+                if (encounter.StartsOrResumesWavesOnCompletion)
+                {
+                    if (!m_HasStartedWaveLoop)
+                    {
+                        StartWaveLoop();
+                        return;
+                    }
+                }
+
+                if (BeginNextAuthoredEncounterAfter(encounter))
+                {
+                    m_CombatHud?.ShowBanner("Next arena fight ready.", 1.5f);
+                    return;
+                }
+
+                if (m_IsWaitingForEncounterResume)
+                {
+                    if (!encounter.StartsOrResumesWavesOnCompletion &&
+                        (m_PendingWaveResumeEncounter == null || ReferenceEquals(encounter, m_PendingWaveResumeEncounter)))
+                    {
+                        Debug.LogWarning(
+                            $"[VRCombat] Encounter '{encounter.name}' completed during a wave milestone, but no follow-up auto-start encounter was available. Resuming waves to avoid stalling progression.",
+                            encounter);
+                    }
+
+                    m_IsWaitingForEncounterResume = false;
+                    m_PendingWaveResumeEncounter = null;
+                    return;
+                }
+
+                m_CombatHud?.ShowBanner("Arena route cleared.", 1.5f);
+                return;
+            }
+
             if (!m_HasStartedWaveLoop)
             {
                 if (encounter.StartsOrResumesWavesOnCompletion)
                     StartWaveLoop();
+                else
+                {
+                    Debug.LogWarning(
+                        $"[VRCombat] Encounter '{encounter.name}' completed without a wave-resume signal. Waves remain paused until an encounter or trigger resumes them.",
+                        encounter);
+                }
 
                 return;
             }
@@ -2747,6 +3410,7 @@ namespace VRCombat.Core
 
             m_HasStartedWaveLoop = true;
             m_SpawnLoop = StartCoroutine(WaveLoop());
+            Debug.Log($"[VRCombat] Wave loop started at wave {m_CurrentWave}.", this);
         }
 
         void SpawnStartingChainWeapon()
@@ -2850,6 +3514,7 @@ namespace VRCombat.Core
                 return;
 
             SetPauseMenuOpen(false);
+            m_IsVictoryMenuOpen = false;
             m_IsGameOver = true;
             m_RunStarted = false;
             if (m_SpawnLoop != null)
@@ -2857,6 +3522,7 @@ namespace VRCombat.Core
 
             FreezeAllEnemiesForDeath();
             Time.timeScale = 0f;
+            m_CombatHud?.HideVictoryPanel();
             m_CombatHud?.HideDeathPanel();
             m_CombatHud?.ShowBanner("You were overwhelmed.", 1.2f);
             m_CombatHud?.FadeToBlack(0.55f);
@@ -2872,6 +3538,8 @@ namespace VRCombat.Core
             if (!isActiveAndEnabled || m_IsRestarting)
                 return;
 
+            m_IsVictoryMenuOpen = false;
+            m_CombatHud?.HideVictoryPanel();
             SetPauseMenuOpen(false);
             StartCoroutine(RestartRunRoutine(initialStartup: false));
         }
@@ -2886,9 +3554,164 @@ namespace VRCombat.Core
 #endif
         }
 
+        void DebugGrantUpgrade(UpgradeKind upgradeKind)
+        {
+            if (m_RunProgressionController == null)
+                return;
+
+            if (!m_RunProgressionController.GrantUpgradeForDebug(upgradeKind))
+                return;
+
+            var upgradeName = RunCatalog.TryGetUpgrade(upgradeKind, out var definition)
+                ? definition.DisplayName
+                : upgradeKind.ToString();
+            m_CombatHud?.ShowBanner($"Debug upgrade: {upgradeName}", 0.9f);
+        }
+
+        void DebugGrantWeapon(WeaponKind weaponKind)
+        {
+            DebugGrantWeaponAtSlot(weaponKind, 0, showBanner: true);
+        }
+
+        void DebugGrantAllWeapons()
+        {
+            var weaponKinds = new[]
+            {
+                WeaponKind.Chain,
+                WeaponKind.Dagger,
+                WeaponKind.Flintlock,
+                WeaponKind.Mace,
+                WeaponKind.Shield,
+                WeaponKind.Spear,
+                WeaponKind.Sword
+            };
+
+            for (var i = 0; i < weaponKinds.Length; i++)
+                DebugGrantWeaponAtSlot(weaponKinds[i], i, showBanner: false);
+
+            m_CombatHud?.ShowBanner("Debug weapons granted", 0.9f);
+        }
+
+        void DebugGrantWeaponAtSlot(WeaponKind weaponKind, int slotIndex, bool showBanner)
+        {
+            if (weaponKind == WeaponKind.None)
+                return;
+
+            if (TryGetDebugRewardPose(slotIndex, out var spawnPosition, out var spawnRotation))
+                SpawnCardRewardWeapon(weaponKind, spawnPosition, spawnRotation);
+            else
+                m_RunProgressionController?.RegisterWeaponAcquired(weaponKind);
+
+            if (!showBanner)
+                return;
+
+            var weaponName = RunCatalog.TryGetWeapon(weaponKind, out var definition)
+                ? definition.DisplayName
+                : weaponKind.ToString();
+            m_CombatHud?.ShowBanner($"Debug weapon: {weaponName}", 0.9f);
+        }
+
+        void DebugUnlockSpell(SpellKind spellKind)
+        {
+            if (spellKind == SpellKind.None || m_RunProgressionController == null)
+                return;
+
+            m_RunProgressionController.UnlockSpell(spellKind);
+            m_PlayerSpellLoadout?.SetSpellsEnabled(true);
+            var spellName = RunCatalog.TryGetSpell(spellKind, out var definition)
+                ? definition.DisplayName
+                : spellKind.ToString();
+            m_CombatHud?.ShowBanner($"Debug spell: {spellName}", 0.9f);
+        }
+
+        bool TryGetDebugRewardPose(int slotIndex, out Vector3 position, out Quaternion rotation)
+        {
+            var referenceTransform = m_PlayerCamera != null ? m_PlayerCamera.transform : transform;
+            var forward = Vector3.ProjectOnPlane(referenceTransform.forward, Vector3.up).normalized;
+            if (forward.sqrMagnitude < 0.001f)
+                forward = Vector3.forward;
+
+            var right = Vector3.ProjectOnPlane(referenceTransform.right, Vector3.up).normalized;
+            if (right.sqrMagnitude < 0.001f)
+                right = Vector3.right;
+
+            var column = slotIndex % 4;
+            var row = slotIndex / 4;
+            position = referenceTransform.position +
+                       forward * (1.15f + row * 0.28f) +
+                       right * ((column - 1.5f) * 0.34f) -
+                       Vector3.up * 1.15f;
+            rotation = Quaternion.LookRotation(forward, Vector3.up);
+
+            if (TryResolveLooseGroundSpawnPosition(position, 0.18f, 0.45f, out var groundedPosition))
+                position = groundedPosition;
+
+            return true;
+        }
+
+        void DebugKillAllEnemies()
+        {
+            DebugKillAllEnemies(showBanner: true);
+        }
+
+        void DebugKillAllEnemies(bool showBanner)
+        {
+            var allEnemies = FindObjectsByType<CapsuleEnemy>(FindObjectsInactive.Exclude, FindObjectsSortMode.None);
+            var killedCount = 0;
+            for (var i = 0; i < allEnemies.Length; i++)
+            {
+                var enemy = allEnemies[i];
+                if (enemy == null)
+                    continue;
+
+                m_ActiveWaveEnemies.Remove(enemy);
+                enemy.ApplyDamage(999999f, enemy.transform.position + Vector3.up * 1f, gameObject);
+                killedCount++;
+            }
+
+            if (showBanner)
+                m_CombatHud?.ShowBanner($"Debug killed {killedCount} enemies", 0.9f);
+        }
+
+        void DebugSetWaveNumber(int waveNumber)
+        {
+            var clampedWave = Mathf.Clamp(waveNumber, 1, 999);
+            if (m_SpawnLoop != null)
+            {
+                StopCoroutine(m_SpawnLoop);
+                m_SpawnLoop = null;
+            }
+
+            if (m_MilestoneKeyCarrier != null)
+                m_MilestoneKeyCarrier.Died -= HandleMilestoneKeyCarrierDied;
+
+            m_PendingWaveResumeEncounter = null;
+            m_MilestoneKeyCarrier = null;
+            m_DeferredNextWave = -1;
+            m_IsWaitingForEncounterResume = false;
+            m_IsVictoryMenuOpen = false;
+            m_ShouldContinueAfterVictory = false;
+            m_EndlessModeActive = clampedWave > BossWaveNumber;
+            m_HasShownVictoryChoice = clampedWave > BossWaveNumber;
+            m_CurrentWave = clampedWave;
+            m_CurrentFlowRate = Mathf.Max(
+                0.08f,
+                m_StartingFlowRatePerSecond + (m_CurrentWave - 1) * m_FlowRateIncreasePerWave);
+
+            DebugKillAllEnemies(showBanner: false);
+            m_ActiveWaveEnemies.Clear();
+            m_HitsTakenThisWave = 0;
+            m_RunStarted = true;
+            m_HasStartedWaveLoop = false;
+            StartWaveLoop();
+
+            m_CombatHud?.SetWaveInfo(m_CurrentWave, 0, m_CurrentFlowRate);
+            m_CombatHud?.ShowBanner($"Debug wave set to {m_CurrentWave}", 1f);
+        }
+
         void SetPauseMenuOpen(bool isOpen)
         {
-            if (m_IsGameOver || m_IsRestarting)
+            if (m_IsGameOver || m_IsRestarting || m_IsVictoryMenuOpen)
                 isOpen = false;
 
             if (m_IsPauseMenuOpen == isOpen)
@@ -2900,10 +3723,30 @@ namespace VRCombat.Core
                 m_CombatHud.SetMovementVignetteStrength(m_MovementVignetteStrength, notify: false);
 
             if (isOpen)
-                Time.timeScale = 0.0001f;
-            else if (!m_IsGameOver && !m_IsRestarting)
+            {
+                Time.timeScale = 0f;
+                m_CombatHud?.FocusPauseMenu();
+            }
+            else if (!m_IsGameOver &&
+                     !m_IsRestarting &&
+                     (m_RunProgressionController == null || !m_RunProgressionController.IsUpgradeSelectionActive))
+            {
                 Time.timeScale = 1f;
+            }
 
+            RefreshRunInteractionState();
+        }
+
+        void ContinueEndlessMode()
+        {
+            if (!m_IsVictoryMenuOpen || m_IsRestarting || m_IsGameOver)
+                return;
+
+            m_EndlessModeActive = true;
+            m_ShouldContinueAfterVictory = true;
+            m_IsVictoryMenuOpen = false;
+            m_CombatHud?.HideVictoryPanel();
+            Time.timeScale = 1f;
             RefreshRunInteractionState();
         }
 
@@ -2932,6 +3775,11 @@ namespace VRCombat.Core
                 m_SpawnLoop = null;
                 m_HasLoggedFirstPauseAttempt = false;
                 m_PendingMetaMenuGesture = false;
+                m_HasLoggedWavePlatformSpawnFailure = false;
+                m_EndlessModeActive = false;
+                m_HasShownVictoryChoice = false;
+                m_IsVictoryMenuOpen = false;
+                m_ShouldContinueAfterVictory = false;
 
                 RestoreSuppressedHandRenderers();
                 DestroyRuntimeCombatObjects();
@@ -2944,6 +3792,7 @@ namespace VRCombat.Core
                 m_NextKillZoneGlobalSweepTime = 0f;
                 m_RunStarted = false;
                 m_HasStartedWaveLoop = false;
+                m_UsesAuthoredEncounterProgression = false;
                 m_HasGrantedIntroChainWeapon = false;
                 m_IsWaitingForEncounterResume = false;
                 m_PendingWaveResumeEncounter = null;
@@ -2967,6 +3816,7 @@ namespace VRCombat.Core
                 m_CombatHud?.ResetForRestart();
                 ConfigureHandFirstInteraction();
                 SetupPauseMenuInputActions();
+                ConfigureControllerLocomotionActionManagers();
                 EnsureRunSystems();
                 m_RunProgressionController?.ResetRun();
                 ResetAllArenaEncounters();
@@ -3031,13 +3881,19 @@ namespace VRCombat.Core
 
         void ConfigureArenaSurface()
         {
-            if (!TryFindArenaRoot(out var arenaRoot))
+            TryFindArenaRoot(out var arenaRoot);
+            var hasScenePlatform = TryFindArenaPlatformRoot(arenaRoot, out var scenePlatformRoot);
+            if (arenaRoot == null && hasScenePlatform && scenePlatformRoot.parent != null)
+                arenaRoot = scenePlatformRoot.parent;
+            if (arenaRoot == null && !hasScenePlatform)
                 return;
 
             m_ArenaSurfaceColliders.Clear();
+            m_ArenaPlatformSurfaceColliders.Clear();
             var candidateColliders = new List<Collider>();
 
-            var meshFilters = arenaRoot.GetComponentsInChildren<MeshFilter>(true);
+            var colliderSearchRoot = arenaRoot != null ? arenaRoot : scenePlatformRoot;
+            var meshFilters = colliderSearchRoot.GetComponentsInChildren<MeshFilter>(true);
             for (var i = 0; i < meshFilters.Length; i++)
             {
                 var meshFilter = meshFilters[i];
@@ -3060,7 +3916,7 @@ namespace VRCombat.Core
                     candidateColliders.Add(meshCollider);
             }
 
-            var existingColliders = arenaRoot.GetComponentsInChildren<Collider>(true);
+            var existingColliders = colliderSearchRoot.GetComponentsInChildren<Collider>(true);
             for (var i = 0; i < existingColliders.Length; i++)
             {
                 var collider = existingColliders[i];
@@ -3071,10 +3927,66 @@ namespace VRCombat.Core
             }
 
             CollectArenaWalkableSurfaces(candidateColliders);
-            TryConfigureKillZoneFromArena(arenaRoot);
+            CollectArenaPlatformSpawnSurfaces(candidateColliders);
+            if (hasScenePlatform)
+            {
+                var foundPrimaryPlatform = IsPrimaryArenaPlatform(scenePlatformRoot);
+                if (foundPrimaryPlatform || m_ArenaPlatformSurfaceColliders.Count == 0)
+                {
+                    m_ArenaPlatformSurfaceColliders.Clear();
+                    AddPlatformRootSurfaces(scenePlatformRoot);
+                }
+            }
 
-            if (TryFindPrimaryTeleportationArea(out var teleportationArea))
+            if (arenaRoot != null)
+                TryConfigureKillZoneFromArena(arenaRoot);
+
+            if (arenaRoot != null && TryFindPrimaryTeleportationArea(out var teleportationArea))
                 ConfigureArenaTeleportationArea(arenaRoot, teleportationArea);
+        }
+
+        void AddPlatformRootSurfaces(Transform platformRoot)
+        {
+            if (platformRoot == null)
+                return;
+
+            var meshFilters = platformRoot.GetComponentsInChildren<MeshFilter>(true);
+            for (var i = 0; i < meshFilters.Length; i++)
+            {
+                var meshFilter = meshFilters[i];
+                if (meshFilter == null || meshFilter.sharedMesh == null)
+                    continue;
+
+                var meshCollider = meshFilter.GetComponent<MeshCollider>();
+                if (meshCollider == null)
+                    meshCollider = meshFilter.gameObject.AddComponent<MeshCollider>();
+
+                meshCollider.sharedMesh = meshFilter.sharedMesh;
+                meshCollider.convex = false;
+                meshCollider.isTrigger = false;
+                meshCollider.enabled = true;
+            }
+
+            var colliders = platformRoot.GetComponentsInChildren<Collider>(true);
+            for (var i = 0; i < colliders.Length; i++)
+            {
+                var collider = colliders[i];
+                if (!IsArenaPlatformSpawnSurfaceCandidate(collider))
+                    continue;
+
+                AddArenaPlatformSurface(collider);
+                if (!m_ArenaSurfaceColliders.Contains(collider))
+                    m_ArenaSurfaceColliders.Add(collider);
+            }
+
+            if (m_ArenaPlatformSurfaceColliders.Count > 0)
+                Debug.Log($"[VRCombat] Using arena platform '{GetTransformPath(platformRoot)}' for wave spawns.", this);
+        }
+
+        static bool IsPrimaryArenaPlatform(Transform platformRoot)
+        {
+            return platformRoot != null &&
+                   string.Equals(platformRoot.name, ArenaPrimaryPlatformObjectName, StringComparison.OrdinalIgnoreCase);
         }
 
         bool IsArenaWalkableCandidate(Collider collider, Transform arenaRoot)
@@ -3172,6 +4084,234 @@ namespace VRCombat.Core
             }
         }
 
+        void CollectArenaPlatformSpawnSurfaces(List<Collider> candidateColliders)
+        {
+            m_ArenaPlatformSurfaceColliders.Clear();
+            if (candidateColliders == null)
+                return;
+
+            TryGetBoundsFromColliders(candidateColliders, out var arenaCandidateBounds);
+            var bestFallbackCollider = default(Collider);
+            var bestFallbackScore = float.NegativeInfinity;
+
+            for (var i = 0; i < candidateColliders.Count; i++)
+            {
+                var collider = candidateColliders[i];
+                if (!IsArenaPlatformSpawnSurfaceCandidate(collider))
+                    continue;
+
+                if (HasColliderOrMeshNameToken(collider, "platform") ||
+                    HasColliderOrMeshNameToken(collider, "grid") ||
+                    HasColliderOrMeshLocalNameToken(collider, "floor"))
+                {
+                    AddArenaPlatformSurface(collider);
+                }
+            }
+
+            if (m_ArenaPlatformSurfaceColliders.Count > 0)
+                return;
+
+            for (var i = 0; i < candidateColliders.Count; i++)
+            {
+                var collider = candidateColliders[i];
+                if (!IsArenaPlatformSpawnSurfaceCandidate(collider))
+                    continue;
+
+                var fallbackScore = ScoreArenaPlatformFallbackSurface(collider, arenaCandidateBounds);
+                if (fallbackScore <= bestFallbackScore)
+                    continue;
+
+                bestFallbackScore = fallbackScore;
+                bestFallbackCollider = collider;
+            }
+
+            if (bestFallbackCollider == null)
+                return;
+
+            var fallbackThreshold = !float.IsNaN(bestFallbackScore) && !float.IsInfinity(bestFallbackScore)
+                ? bestFallbackScore - Mathf.Max(4f, Mathf.Abs(bestFallbackScore) * 0.35f)
+                : bestFallbackScore;
+            for (var i = 0; i < candidateColliders.Count; i++)
+            {
+                var collider = candidateColliders[i];
+                if (!IsArenaPlatformSpawnSurfaceCandidate(collider))
+                    continue;
+
+                if (ScoreArenaPlatformFallbackSurface(collider, arenaCandidateBounds) >= fallbackThreshold)
+                    AddArenaPlatformSurface(collider);
+            }
+
+            if (m_ArenaPlatformSurfaceColliders.Count == 0)
+                AddArenaPlatformSurface(bestFallbackCollider);
+        }
+
+        void AddArenaPlatformSurface(Collider collider)
+        {
+            if (collider != null && !m_ArenaPlatformSurfaceColliders.Contains(collider))
+                m_ArenaPlatformSurfaceColliders.Add(collider);
+        }
+
+        static bool IsArenaPlatformSpawnSurfaceCandidate(Collider collider)
+        {
+            return collider != null &&
+                   collider.enabled &&
+                   !collider.isTrigger &&
+                   !HasColliderOrMeshAnyNameToken(collider, s_PlatformSpawnRejectedNameTokens) &&
+                   TryGetColliderTopSurfaceHit(collider, out _);
+        }
+
+        float ScoreArenaPlatformFallbackSurface(Collider collider, Bounds arenaCandidateBounds)
+        {
+            if (collider == null)
+                return float.NegativeInfinity;
+
+            var bounds = collider.bounds;
+            var horizontalArea = Mathf.Max(0.01f, bounds.size.x * bounds.size.z);
+            var referencePosition = GetArenaPlatformReferencePosition(arenaCandidateBounds, bounds);
+            var distanceFromCenter = Vector2.Distance(
+                new Vector2(bounds.center.x, bounds.center.z),
+                new Vector2(referencePosition.x, referencePosition.z));
+            var floorNameBonus =
+                HasColliderOrMeshLocalNameToken(collider, "floor") ||
+                HasColliderOrMeshLocalNameToken(collider, "arena")
+                    ? horizontalArea * 1.5f
+                    : 0f;
+            var containsReferenceBonus = ContainsHorizontalPoint(bounds, referencePosition)
+                ? horizontalArea * 2.5f
+                : 0f;
+
+            return horizontalArea + floorNameBonus + containsReferenceBonus - distanceFromCenter * Mathf.Max(1f, Mathf.Sqrt(horizontalArea));
+        }
+
+        Vector3 GetArenaPlatformReferencePosition(Bounds arenaCandidateBounds, Bounds fallbackBounds)
+        {
+            if (m_PlayerCamera != null)
+                return m_PlayerCamera.transform.position;
+
+            return arenaCandidateBounds.size.sqrMagnitude > 0.0001f
+                ? arenaCandidateBounds.center
+                : fallbackBounds.center;
+        }
+
+        static bool ContainsHorizontalPoint(Bounds bounds, Vector3 point)
+        {
+            return point.x >= bounds.min.x &&
+                   point.x <= bounds.max.x &&
+                   point.z >= bounds.min.z &&
+                   point.z <= bounds.max.z;
+        }
+
+        static bool TryGetColliderTopSurfaceHit(Collider collider, out RaycastHit bestHit)
+        {
+            bestHit = default;
+            if (collider == null || !collider.enabled || collider.isTrigger)
+                return false;
+
+            var bounds = collider.bounds;
+            if (!IsFiniteVector3(bounds.center) || !IsFiniteVector3(bounds.size))
+                return false;
+
+            var insetX = Mathf.Min(0.2f, bounds.extents.x * 0.35f);
+            var insetZ = Mathf.Min(0.2f, bounds.extents.z * 0.35f);
+            var minX = bounds.min.x + insetX;
+            var maxX = bounds.max.x - insetX;
+            var minZ = bounds.min.z + insetZ;
+            var maxZ = bounds.max.z - insetZ;
+            if (minX > maxX)
+                minX = maxX = bounds.center.x;
+            if (minZ > maxZ)
+                minZ = maxZ = bounds.center.z;
+
+            var rayDistance = Mathf.Max(2f, bounds.size.y + ArenaGroundSnapProbeHeight + 2f);
+            var rayStartY = bounds.max.y + ArenaGroundSnapProbeHeight + 0.75f;
+            var closestDistance = float.PositiveInfinity;
+
+            const int sampleGridResolution = 7;
+            for (var xIndex = 0; xIndex < sampleGridResolution; xIndex++)
+            {
+                var tx = xIndex / (float)(sampleGridResolution - 1);
+                var sampleX = Mathf.Lerp(minX, maxX, tx);
+                for (var zIndex = 0; zIndex < sampleGridResolution; zIndex++)
+                {
+                    var tz = zIndex / (float)(sampleGridResolution - 1);
+                    var sampleZ = Mathf.Lerp(minZ, maxZ, tz);
+                    var ray = new Ray(new Vector3(sampleX, rayStartY, sampleZ), Vector3.down);
+                    if (!collider.Raycast(ray, out var hit, rayDistance))
+                        continue;
+
+                    if (hit.normal.y < ArenaGroundSnapNormalThreshold)
+                        continue;
+
+                    if (hit.distance >= closestDistance)
+                        continue;
+
+                    closestDistance = hit.distance;
+                    bestHit = hit;
+                }
+            }
+
+            return closestDistance < float.PositiveInfinity;
+        }
+
+        static bool HasColliderOrMeshAnyNameToken(Collider collider, string[] nameTokens)
+        {
+            if (collider == null || nameTokens == null)
+                return false;
+
+            if (HasAnyNameToken(collider.transform, nameTokens))
+                return true;
+
+            for (var i = 0; i < nameTokens.Length; i++)
+            {
+                if (HasColliderOrMeshLocalNameToken(collider, nameTokens[i]))
+                    return true;
+            }
+
+            return false;
+        }
+
+        static bool HasColliderOrMeshNameToken(Collider collider, string nameToken)
+        {
+            if (collider == null || string.IsNullOrWhiteSpace(nameToken))
+                return false;
+
+            if (HasNameToken(collider.transform, nameToken))
+                return true;
+
+            if (collider is MeshCollider meshCollider &&
+                meshCollider.sharedMesh != null &&
+                ContainsNameToken(meshCollider.sharedMesh.name, nameToken))
+            {
+                return true;
+            }
+
+            var meshFilter = collider.GetComponent<MeshFilter>();
+            return meshFilter != null &&
+                   meshFilter.sharedMesh != null &&
+                   ContainsNameToken(meshFilter.sharedMesh.name, nameToken);
+        }
+
+        static bool HasColliderOrMeshLocalNameToken(Collider collider, string nameToken)
+        {
+            if (collider == null || string.IsNullOrWhiteSpace(nameToken))
+                return false;
+
+            if (ContainsNameToken(collider.transform.name, nameToken))
+                return true;
+
+            if (collider is MeshCollider meshCollider &&
+                meshCollider.sharedMesh != null &&
+                ContainsNameToken(meshCollider.sharedMesh.name, nameToken))
+            {
+                return true;
+            }
+
+            var meshFilter = collider.GetComponent<MeshFilter>();
+            return meshFilter != null &&
+                   meshFilter.sharedMesh != null &&
+                   ContainsNameToken(meshFilter.sharedMesh.name, nameToken);
+        }
+
         static bool TryGetBoundsFromColliders(IReadOnlyList<Collider> colliders, out Bounds bounds)
         {
             bounds = default;
@@ -3221,13 +4361,20 @@ namespace VRCombat.Core
             var current = transformCandidate;
             while (current != null)
             {
-                if (current.name.IndexOf(nameToken, StringComparison.OrdinalIgnoreCase) >= 0)
+                if (ContainsNameToken(current.name, nameToken))
                     return true;
 
                 current = current.parent;
             }
 
             return false;
+        }
+
+        static bool ContainsNameToken(string value, string nameToken)
+        {
+            return !string.IsNullOrWhiteSpace(value) &&
+                   !string.IsNullOrWhiteSpace(nameToken) &&
+                   value.IndexOf(nameToken, StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         bool TryFindArenaRoot(out Transform arenaRoot)
@@ -3287,6 +4434,56 @@ namespace VRCombat.Core
             }
 
             return false;
+        }
+
+        bool TryFindArenaPlatformRoot(Transform preferredArenaRoot, out Transform platformRoot)
+        {
+            platformRoot = null;
+            var allTransforms = FindObjectsByType<Transform>(FindObjectsInactive.Include, FindObjectsSortMode.None);
+            for (var nameIndex = 0; nameIndex < s_ArenaPlatformObjectNames.Length; nameIndex++)
+            {
+                var platformName = s_ArenaPlatformObjectNames[nameIndex];
+                for (var i = 0; i < allTransforms.Length; i++)
+                {
+                    var candidate = allTransforms[i];
+                    if (!IsNamedArenaPlatformCandidate(candidate, platformName))
+                        continue;
+
+                    if (preferredArenaRoot != null && candidate != preferredArenaRoot && !candidate.IsChildOf(preferredArenaRoot))
+                        continue;
+
+                    platformRoot = candidate;
+                    return true;
+                }
+            }
+
+            for (var nameIndex = 0; nameIndex < s_ArenaPlatformObjectNames.Length; nameIndex++)
+            {
+                var platformName = s_ArenaPlatformObjectNames[nameIndex];
+                for (var i = 0; i < allTransforms.Length; i++)
+                {
+                    var candidate = allTransforms[i];
+                    if (!IsNamedArenaPlatformCandidate(candidate, platformName))
+                        continue;
+
+                    platformRoot = candidate;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        static bool IsNamedArenaPlatformCandidate(Transform candidate, string platformName)
+        {
+            if (candidate == null || !candidate.gameObject.activeInHierarchy || string.IsNullOrWhiteSpace(platformName))
+                return false;
+
+            if (!string.Equals(candidate.name, platformName, StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            return candidate.GetComponentInChildren<Collider>(true) != null ||
+                   candidate.GetComponentInChildren<MeshFilter>(true) != null;
         }
 
         static bool TryFindPrimaryTeleportationArea(out TeleportationArea teleportationArea)
@@ -3866,6 +5063,7 @@ namespace VRCombat.Core
                     maxZ,
                     capsuleRadius,
                     capsuleHeight,
+                    m_ArenaSurfaceColliders,
                     out resolvedWorldPosition))
             {
                 return true;
@@ -3881,12 +5079,122 @@ namespace VRCombat.Core
                     maxZ,
                     capsuleRadius,
                     capsuleHeight,
+                    m_ArenaSurfaceColliders,
                     out resolvedWorldPosition))
             {
                 return true;
             }
 
             return false;
+        }
+
+        bool TryResolveArenaPlatformSpawnPosition(
+            Vector3 desiredWorldPosition,
+            float capsuleRadius,
+            float capsuleHeight,
+            out Vector3 resolvedWorldPosition)
+        {
+            resolvedWorldPosition = default;
+            if (m_ArenaPlatformSurfaceColliders.Count == 0)
+                ConfigureArenaSurface();
+
+            if (m_ArenaPlatformSurfaceColliders.Count == 0 ||
+                !TryGetBoundsFromColliders(m_ArenaPlatformSurfaceColliders, out var platformBounds))
+            {
+                return false;
+            }
+
+            var horizontalPadding = Mathf.Max(0.3f, capsuleRadius + 0.15f);
+            var minX = platformBounds.min.x + horizontalPadding;
+            var maxX = platformBounds.max.x - horizontalPadding;
+            var minZ = platformBounds.min.z + horizontalPadding;
+            var maxZ = platformBounds.max.z - horizontalPadding;
+            if (minX >= maxX || minZ >= maxZ)
+                return false;
+
+            var probeY = platformBounds.max.y + ArenaGroundSnapProbeHeight + Mathf.Max(0.5f, capsuleHeight);
+            var probeDistance = Mathf.Max(platformBounds.size.y + ArenaGroundSnapDistance + capsuleHeight + 2f, 6f);
+            var clampedDesired = new Vector3(
+                Mathf.Clamp(desiredWorldPosition.x, minX, maxX),
+                probeY,
+                Mathf.Clamp(desiredWorldPosition.z, minZ, maxZ));
+
+            if (TryFindClearArenaSpawnCandidate(
+                    clampedDesired,
+                    probeDistance,
+                    minX,
+                    maxX,
+                    minZ,
+                    maxZ,
+                    capsuleRadius,
+                    capsuleHeight,
+                    m_ArenaPlatformSurfaceColliders,
+                    out resolvedWorldPosition))
+            {
+                return true;
+            }
+
+            var fallbackPoint = new Vector3(platformBounds.center.x, probeY, platformBounds.center.z);
+            if (TryFindClearArenaSpawnCandidate(
+                    fallbackPoint,
+                    probeDistance,
+                    minX,
+                    maxX,
+                    minZ,
+                    maxZ,
+                    capsuleRadius,
+                    capsuleHeight,
+                    m_ArenaPlatformSurfaceColliders,
+                    out resolvedWorldPosition))
+            {
+                return true;
+            }
+
+            return TryFindClearPlatformColliderSpawnCandidate(
+                capsuleRadius,
+                capsuleHeight,
+                out resolvedWorldPosition);
+        }
+
+        bool TryResolveWaveEnemySpawnPosition(
+            Vector3 desiredWorldPosition,
+            float capsuleRadius,
+            float capsuleHeight,
+            out Vector3 resolvedWorldPosition)
+        {
+            if (TryResolveArenaPlatformSpawnPosition(desiredWorldPosition, capsuleRadius, capsuleHeight, out resolvedWorldPosition))
+            {
+                ReserveEncounterSpace(resolvedWorldPosition, 6f, 3f, 6f);
+                return true;
+            }
+
+            LogWavePlatformSpawnFailureOnce();
+            resolvedWorldPosition = default;
+            return false;
+        }
+
+        void LogWavePlatformSpawnFailureOnce()
+        {
+            if (m_HasLoggedWavePlatformSpawnFailure)
+                return;
+
+            m_HasLoggedWavePlatformSpawnFailure = true;
+            var surfaceNames = new StringBuilder();
+            for (var i = 0; i < m_ArenaPlatformSurfaceColliders.Count; i++)
+            {
+                var surface = m_ArenaPlatformSurfaceColliders[i];
+                if (surface == null)
+                    continue;
+
+                if (surfaceNames.Length > 0)
+                    surfaceNames.Append(", ");
+
+                surfaceNames.Append(surface.name);
+            }
+
+            Debug.LogWarning(
+                $"Wave spawn skipped because no clear point was found on the arena platform. Platform surfaces={m_ArenaPlatformSurfaceColliders.Count}; names=[{surfaceNames}]",
+                this);
         }
 
         public bool TryResolveLooseGroundSpawnPosition(
@@ -3932,6 +5240,66 @@ namespace VRCombat.Core
             return false;
         }
 
+        bool TryFindClearPlatformColliderSpawnCandidate(
+            float capsuleRadius,
+            float capsuleHeight,
+            out Vector3 resolvedWorldPosition)
+        {
+            resolvedWorldPosition = default;
+            if (m_ArenaPlatformSurfaceColliders.Count == 0)
+                return false;
+
+            var surfaceCount = m_ArenaPlatformSurfaceColliders.Count;
+            var maxAttempts = Mathf.Max(EnemySpawnResolutionAttempts * 6, surfaceCount * 8);
+            for (var attempt = 0; attempt < maxAttempts; attempt++)
+            {
+                var surface = m_ArenaPlatformSurfaceColliders[attempt % surfaceCount];
+                if (surface == null || !surface.enabled || surface.isTrigger)
+                    continue;
+
+                var bounds = surface.bounds;
+                var horizontalPadding = Mathf.Max(0.18f, capsuleRadius + 0.08f);
+                var minX = bounds.min.x + horizontalPadding;
+                var maxX = bounds.max.x - horizontalPadding;
+                var minZ = bounds.min.z + horizontalPadding;
+                var maxZ = bounds.max.z - horizontalPadding;
+                if (minX >= maxX || minZ >= maxZ)
+                    continue;
+
+                var samplePoint = GetPlatformColliderSpawnSamplePoint(bounds, attempt, minX, maxX, minZ, maxZ);
+                var probeDistance = Mathf.Max(bounds.size.y + ArenaGroundSnapDistance + capsuleHeight + 2f, 6f);
+                Vector3 groundedPosition;
+                if (TryGetArenaGroundHit(
+                        samplePoint,
+                        probeDistance,
+                        m_ArenaPlatformSurfaceColliders,
+                        float.PositiveInfinity,
+                        out var hit))
+                {
+                    groundedPosition = hit.point + Vector3.up * Mathf.Max(ArenaGroundSnapYOffset, m_TeleportSpawnHeightOffset);
+                }
+                else
+                {
+                    continue;
+                }
+
+                if (HasSpawnClearance(groundedPosition, capsuleRadius, capsuleHeight))
+                {
+                    resolvedWorldPosition = groundedPosition;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        static bool IsFiniteVector3(Vector3 value)
+        {
+            return !float.IsNaN(value.x) && !float.IsInfinity(value.x) &&
+                   !float.IsNaN(value.y) && !float.IsInfinity(value.y) &&
+                   !float.IsNaN(value.z) && !float.IsInfinity(value.z);
+        }
+
         bool TryFindClearArenaSpawnCandidate(
             Vector3 anchorPoint,
             float probeDistance,
@@ -3941,15 +5309,26 @@ namespace VRCombat.Core
             float maxZ,
             float capsuleRadius,
             float capsuleHeight,
+            IReadOnlyList<Collider> allowedSurfaceColliders,
             out Vector3 resolvedWorldPosition)
         {
             resolvedWorldPosition = default;
+            var maxAttempts = ReferenceEquals(allowedSurfaceColliders, m_ArenaPlatformSurfaceColliders)
+                ? EnemySpawnResolutionAttempts * 3
+                : EnemySpawnResolutionAttempts;
 
-            for (var attempt = 0; attempt < EnemySpawnResolutionAttempts; attempt++)
+            for (var attempt = 0; attempt < maxAttempts; attempt++)
             {
                 var samplePoint = GetArenaSpawnSamplePoint(anchorPoint, attempt, minX, maxX, minZ, maxZ);
-                if (!TryGetArenaGroundHit(samplePoint, probeDistance, out var hit))
+                if (!TryGetArenaGroundHit(
+                        samplePoint,
+                        probeDistance,
+                        allowedSurfaceColliders,
+                        float.PositiveInfinity,
+                        out var hit))
+                {
                     continue;
+                }
 
                 var groundedPosition = hit.point + Vector3.up * Mathf.Max(ArenaGroundSnapYOffset, m_TeleportSpawnHeightOffset);
                 if (!HasSpawnClearance(groundedPosition, capsuleRadius, capsuleHeight))
@@ -3960,6 +5339,26 @@ namespace VRCombat.Core
             }
 
             return false;
+        }
+
+        static Vector3 GetPlatformColliderSpawnSamplePoint(
+            Bounds bounds,
+            int attempt,
+            float minX,
+            float maxX,
+            float minZ,
+            float maxZ)
+        {
+            if (attempt <= 0)
+                return new Vector3(bounds.center.x, bounds.max.y + ArenaGroundSnapProbeHeight + 1.5f, bounds.center.z);
+
+            var normalizedAttempt = Mathf.Clamp01((attempt - 1) / (float)Mathf.Max(1, EnemySpawnResolutionAttempts * 6 - 2));
+            var angle = (attempt - 1) * 137.50776f * Mathf.Deg2Rad;
+            var radiusX = Mathf.Lerp(0.15f, Mathf.Max(0.15f, (maxX - minX) * 0.5f), normalizedAttempt);
+            var radiusZ = Mathf.Lerp(0.15f, Mathf.Max(0.15f, (maxZ - minZ) * 0.5f), normalizedAttempt);
+            var x = Mathf.Clamp(bounds.center.x + Mathf.Cos(angle) * radiusX, minX, maxX);
+            var z = Mathf.Clamp(bounds.center.z + Mathf.Sin(angle) * radiusZ, minZ, maxZ);
+            return new Vector3(x, bounds.max.y + ArenaGroundSnapProbeHeight + 1.5f, z);
         }
 
         static Vector3 GetArenaSpawnSamplePoint(Vector3 clampedDesired, int attempt, float minX, float maxX, float minZ, float maxZ)
@@ -4068,11 +5467,24 @@ namespace VRCombat.Core
                 if (collider == null || !collider.enabled || collider.isTrigger)
                     continue;
 
+                if (m_PlayerRoot != null && collider.transform.IsChildOf(m_PlayerRoot))
+                    continue;
+
                 if (ContainsCollider(m_ArenaSurfaceColliders, collider))
+                    continue;
+
+                if (ContainsCollider(m_ArenaPlatformSurfaceColliders, collider))
                     continue;
 
                 if (m_RuntimeArenaTeleportCollider != null && collider == m_RuntimeArenaTeleportCollider)
                     continue;
+
+                if (collider.GetComponentInParent<CapsuleEnemy>() == null &&
+                    (collider.GetComponentInParent<XRBaseInteractable>() != null ||
+                     collider.GetComponentInParent<XRGrabInteractable>() != null))
+                {
+                    continue;
+                }
 
                 if (collider.GetComponentInParent<TeleportationArea>() != null ||
                     collider.GetComponentInParent<ArenaOpeningEncounter>() != null ||
@@ -5030,11 +6442,11 @@ namespace VRCombat.Core
             var rigidbody = root.AddComponent<Rigidbody>();
             var chainDefinition = GetWeaponDefinitionOrDefault(WeaponKind.Chain, 0.92f);
             rigidbody.mass = chainDefinition.RigidbodyMass;
-            rigidbody.linearDamping = chainDefinition.RigidbodyLinearDamping;
-            rigidbody.angularDamping = chainDefinition.RigidbodyAngularDamping;
+            rigidbody.linearDamping = 0.018f;
+            rigidbody.angularDamping = 0.028f;
             rigidbody.solverIterations = 18;
             rigidbody.solverVelocityIterations = 8;
-            rigidbody.maxAngularVelocity = 220f;
+            rigidbody.maxAngularVelocity = 420f;
             rigidbody.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
             rigidbody.interpolation = RigidbodyInterpolation.Interpolate;
 
@@ -5054,7 +6466,7 @@ namespace VRCombat.Core
 
             var riggedChainWeapon = InitializeRuntimeChainWeapon(root, rigidbody, collider, chainDefinition);
 
-            SetupWallMountedPickup(root, grabInteractable, riggedChainWeapon, keepKinematicWhileHeld: false);
+            SetupWallMountedPickup(root, grabInteractable, riggedChainWeapon, keepKinematicWhileHeld: true);
         }
 
         void CreateWallShieldPickup(string pickupName, Vector3 worldPosition, Quaternion worldRotation)
@@ -5064,53 +6476,7 @@ namespace VRCombat.Core
             root.transform.rotation = worldRotation;
             RegisterRuntimeObject(root);
 
-            var shieldDisk = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
-            shieldDisk.name = "Shield Disk";
-            shieldDisk.transform.SetParent(root.transform, false);
-            shieldDisk.transform.localPosition = Vector3.zero;
-            shieldDisk.transform.localRotation = Quaternion.Euler(90f, 0f, 0f);
-            shieldDisk.transform.localScale = new Vector3(0.3f, 0.032f, 0.3f);
-            ApplyMaterial(shieldDisk, GetOrCreateShieldMaterial());
-
-            var shieldHandle = GameObject.CreatePrimitive(PrimitiveType.Cube);
-            shieldHandle.name = "Shield Handle";
-            shieldHandle.transform.SetParent(root.transform, false);
-            shieldHandle.transform.localPosition = new Vector3(0f, 0f, -0.04f);
-            shieldHandle.transform.localRotation = Quaternion.identity;
-            shieldHandle.transform.localScale = new Vector3(0.12f, 0.042f, 0.04f);
-            ApplyMaterial(shieldHandle, GetOrCreatePickupMaterial());
-
-            var diskCollider = shieldDisk.GetComponent<Collider>();
-            if (diskCollider != null)
-                Destroy(diskCollider);
-            var handleCollider = shieldHandle.GetComponent<Collider>();
-            if (handleCollider != null)
-                Destroy(handleCollider);
-
-            var collider = root.AddComponent<BoxCollider>();
-            collider.center = new Vector3(0f, 0f, -0.012f);
-            collider.size = new Vector3(0.44f, 0.44f, 0.08f);
-            collider.contactOffset = 0.0065f;
-
-            var rigidbody = root.AddComponent<Rigidbody>();
-            rigidbody.mass = 2.5f;
-            rigidbody.linearDamping = 0.2f;
-            rigidbody.angularDamping = 0.22f;
-            rigidbody.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
-            rigidbody.interpolation = RigidbodyInterpolation.Interpolate;
-
-            var grabInteractable = root.AddComponent<XRGrabInteractable>();
-            ConfigureGrabInteractable(
-                grabInteractable,
-                allowDynamicAttach: true,
-                movementType: XRBaseInteractable.MovementType.Instantaneous);
-            grabInteractable.throwOnDetach = false;
-
-            var attachPoint = new GameObject("Attach Point");
-            attachPoint.transform.SetParent(root.transform, false);
-            attachPoint.transform.localPosition = new Vector3(0f, 0f, -0.04f);
-            attachPoint.transform.localRotation = Quaternion.identity;
-            grabInteractable.attachTransform = attachPoint.transform;
+            var grabInteractable = ConfigureShieldPickup(root);
 
             SetupWallMountedPickup(root, grabInteractable, keepKinematicWhileHeld: true);
         }
@@ -5153,48 +6519,54 @@ namespace VRCombat.Core
 
         public void SpawnCardRewardWeapon(WeaponKind weaponKind, Vector3 worldPosition, Quaternion worldRotation)
         {
-            var groundedPosition = ResolveGroundedSpawnPosition(worldPosition);
             var flatForward = Vector3.ProjectOnPlane(worldRotation * Vector3.forward, Vector3.up).normalized;
             if (flatForward.sqrMagnitude < 0.001f)
                 flatForward = Vector3.forward;
+
+            var spawnPosition = worldPosition + flatForward * 0.14f - Vector3.up * 0.04f;
+            if (TryResolveLooseGroundSpawnPosition(spawnPosition, 0.18f, 0.45f, out var groundedPosition) &&
+                Mathf.Abs(groundedPosition.y - spawnPosition.y) <= 0.2f)
+            {
+                spawnPosition = groundedPosition;
+            }
 
             var groundedRotation = Quaternion.LookRotation(flatForward, Vector3.up);
 
             switch (weaponKind)
             {
                 case WeaponKind.Chain:
-                    CreateLooseChainPickup("Reward Chain", groundedPosition, groundedRotation);
+                    CreateLooseChainPickup("Reward Chain", spawnPosition, groundedRotation);
                     break;
                 case WeaponKind.Dagger:
                     CreateLooseBladePickup(
                         "Reward Dagger A",
-                        groundedPosition + Vector3.left * 0.08f,
+                        spawnPosition + Vector3.left * 0.08f,
                         groundedRotation,
                         DaggerModelResourcePath,
                         0.6f,
                         WeaponKind.Dagger);
                     CreateLooseBladePickup(
                         "Reward Dagger B",
-                        groundedPosition + Vector3.right * 0.08f,
+                        spawnPosition + Vector3.right * 0.08f,
                         groundedRotation,
                         DaggerModelResourcePath,
                         0.6f,
                         WeaponKind.Dagger);
                     break;
                 case WeaponKind.Flintlock:
-                    TryCreateLooseFlintlockPickup("Reward Flintlock", groundedPosition, groundedRotation);
+                    TryCreateLooseFlintlockPickup("Reward Flintlock", spawnPosition, groundedRotation);
                     break;
                 case WeaponKind.Mace:
-                    CreateLooseBladePickup("Reward Mace", groundedPosition, groundedRotation, MaceModelResourcePath, 0.78f, WeaponKind.Mace);
+                    CreateLooseBladePickup("Reward Mace", spawnPosition, groundedRotation, MaceModelResourcePath, 0.78f, WeaponKind.Mace);
                     break;
                 case WeaponKind.Shield:
-                    CreateLooseShieldPickup("Reward Shield", groundedPosition, groundedRotation);
+                    CreateLooseShieldPickup("Reward Shield", spawnPosition, groundedRotation);
                     break;
                 case WeaponKind.Spear:
-                    CreateLooseBladePickup("Reward Spear", groundedPosition, groundedRotation, SpearModelResourcePath, 1.18f, WeaponKind.Spear);
+                    CreateLooseBladePickup("Reward Spear", spawnPosition, groundedRotation, SpearModelResourcePath, 1.18f, WeaponKind.Spear);
                     break;
                 case WeaponKind.Sword:
-                    CreateLooseBladePickup("Reward Sword", groundedPosition, groundedRotation, SwordModelResourcePath, 0.95f, WeaponKind.Sword);
+                    CreateLooseBladePickup("Reward Sword", spawnPosition, groundedRotation, SwordModelResourcePath, 0.95f, WeaponKind.Sword);
                     break;
             }
 
@@ -5265,52 +6637,153 @@ namespace VRCombat.Core
             root.transform.rotation = worldRotation;
             RegisterRuntimeObject(root);
 
-            if (!TryInstantiateRuntimeModelVisual(ShieldModelResourcePath, "Shield Visual", root.transform, out var visualRoot))
+            var grabInteractable = ConfigureShieldPickup(root);
+            SetupLoosePickup(root, grabInteractable);
+        }
+
+        XRGrabInteractable ConfigureShieldPickup(GameObject root)
+        {
+            if (root == null)
+                return null;
+
+            var weaponDefinition = GetWeaponDefinitionOrDefault(WeaponKind.Shield, 0.65f);
+            CreateShieldVisual(root.transform, weaponDefinition.PickupLength, out var shieldLayout);
+
+            var collider = root.AddComponent<BoxCollider>();
+            collider.center = shieldLayout.ColliderCenter;
+            collider.size = shieldLayout.ColliderSize;
+            collider.contactOffset = 0.0065f;
+
+            var rigidbody = root.AddComponent<Rigidbody>();
+            ConfigureShieldRigidbody(rigidbody, weaponDefinition);
+
+            var grabInteractable = root.AddComponent<XRGrabInteractable>();
+            ConfigureShieldGrabInteractable(root, grabInteractable, collider, shieldLayout);
+
+            EnsureSwingWeapon(
+                root,
+                makeTriggerCollider: false,
+                forceKinematic: false,
+                defaultRadius: Mathf.Max(0.18f, Mathf.Max(shieldLayout.ColliderSize.x, shieldLayout.ColliderSize.y) * 0.45f));
+
+            var damageDealer = root.GetComponent<SwingDamageDealer>();
+            if (damageDealer != null)
             {
-                var fallback = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
-                fallback.name = "Shield Visual";
-                fallback.transform.SetParent(root.transform, false);
-                fallback.transform.localRotation = Quaternion.Euler(90f, 0f, 0f);
-                fallback.transform.localScale = new Vector3(0.3f, 0.032f, 0.3f);
-                ApplyMaterial(fallback, GetOrCreateShieldMaterial());
-                visualRoot = fallback;
+                damageDealer.Configure(
+                    weaponDefinition.BaseDamage,
+                    weaponDefinition.MinSwingSpeed,
+                    weaponDefinition.MaxSwingSpeedForScaling,
+                    weaponDefinition.HitCooldownSeconds,
+                    weaponDefinition.ProximityFallbackRadius);
+            }
+
+            ConfigureRuntimeWeaponModifiers(root, WeaponKind.Shield, requiresShieldUnlock: true);
+            return grabInteractable;
+        }
+
+        void CreateShieldVisual(Transform parent, float targetLength, out ShieldPickupLayout shieldLayout)
+        {
+            if (TryInstantiateRuntimeModelVisual(ShieldModelResourcePath, "Shield Visual", parent, out var visualRoot))
+            {
+                RuntimeCombatModelMaterialBinder.Apply(visualRoot, GetOrCreateShieldMaterial());
+                UniformScaleVisualToLength(visualRoot.transform, targetLength);
+                CenterVisualAndPlaceBackEdge(visualRoot.transform, -0.02f);
             }
             else
             {
-                UniformScaleVisualToLength(visualRoot.transform, 0.65f);
-                CenterVisualAndPlaceBackEdge(visualRoot.transform, -0.02f);
+                CreateFallbackShieldVisual(parent);
             }
 
-            if (!TryGetVisualBoundsRelativeToReference(root.transform, root.transform, out var shieldBounds))
+            if (!TryGetVisualBoundsRelativeToReference(parent, parent, out var shieldBounds))
                 shieldBounds = new Bounds(new Vector3(0f, 0f, -0.02f), new Vector3(0.42f, 0.42f, 0.08f));
 
-            var collider = root.AddComponent<BoxCollider>();
-            collider.center = shieldBounds.center;
-            collider.size = shieldBounds.size + new Vector3(0.04f, 0.04f, 0.04f);
+            shieldLayout = BuildShieldPickupLayoutFromBounds(shieldBounds);
+        }
 
-            var rigidbody = root.AddComponent<Rigidbody>();
-            rigidbody.mass = 2.5f;
-            rigidbody.linearDamping = 0.2f;
-            rigidbody.angularDamping = 0.22f;
+        void CreateFallbackShieldVisual(Transform parent)
+        {
+            var shieldDisk = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
+            shieldDisk.name = "Shield Disk";
+            shieldDisk.transform.SetParent(parent, false);
+            shieldDisk.transform.localPosition = Vector3.zero;
+            shieldDisk.transform.localRotation = Quaternion.Euler(90f, 0f, 0f);
+            shieldDisk.transform.localScale = new Vector3(0.3f, 0.032f, 0.3f);
+            ApplyMaterial(shieldDisk, GetOrCreateShieldMaterial());
+
+            var shieldHandle = GameObject.CreatePrimitive(PrimitiveType.Cube);
+            shieldHandle.name = "Shield Handle";
+            shieldHandle.transform.SetParent(parent, false);
+            shieldHandle.transform.localPosition = new Vector3(0f, 0f, -0.055f);
+            shieldHandle.transform.localRotation = Quaternion.identity;
+            shieldHandle.transform.localScale = new Vector3(0.12f, 0.042f, 0.04f);
+            ApplyMaterial(shieldHandle, GetOrCreatePickupMaterial());
+
+            StripImportedColliders(shieldDisk);
+            StripImportedColliders(shieldHandle);
+        }
+
+        static ShieldPickupLayout BuildShieldPickupLayoutFromBounds(Bounds bounds)
+        {
+            var colliderSize = new Vector3(
+                Mathf.Max(0.36f, bounds.size.x + 0.04f),
+                Mathf.Max(0.36f, bounds.size.y + 0.04f),
+                Mathf.Max(0.08f, bounds.size.z + 0.04f));
+
+            return new ShieldPickupLayout
+            {
+                ColliderCenter = bounds.center,
+                ColliderSize = colliderSize,
+                AttachLocalPosition = new Vector3(bounds.center.x, bounds.center.y, bounds.min.z - 0.035f),
+                AttachLocalRotation = Quaternion.identity
+            };
+        }
+
+        static void ConfigureShieldRigidbody(Rigidbody rigidbody, WeaponDefinition weaponDefinition)
+        {
+            if (rigidbody == null)
+                return;
+
+            rigidbody.mass = weaponDefinition != null ? weaponDefinition.RigidbodyMass : 2.5f;
+            rigidbody.linearDamping = weaponDefinition != null ? weaponDefinition.RigidbodyLinearDamping : 0.2f;
+            rigidbody.angularDamping = weaponDefinition != null ? weaponDefinition.RigidbodyAngularDamping : 0.22f;
             rigidbody.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
             rigidbody.interpolation = RigidbodyInterpolation.Interpolate;
+        }
 
-            var grabInteractable = root.AddComponent<XRGrabInteractable>();
+        void ConfigureShieldGrabInteractable(
+            GameObject pickupRoot,
+            XRGrabInteractable grabInteractable,
+            Collider shieldCollider,
+            ShieldPickupLayout shieldLayout)
+        {
+            if (pickupRoot == null || grabInteractable == null)
+                return;
+
             ConfigureGrabInteractable(
                 grabInteractable,
-                allowDynamicAttach: true,
+                allowDynamicAttach: false,
                 movementType: XRBaseInteractable.MovementType.Instantaneous);
             grabInteractable.throwOnDetach = false;
-            ConfigureChainHoldFollow(grabInteractable);
+            ConfigureWeaponHoldFollow(grabInteractable);
+            grabInteractable.colliders.Clear();
+            if (shieldCollider != null)
+                grabInteractable.colliders.Add(shieldCollider);
 
-            var attachPoint = new GameObject(AttachPointObjectName);
-            attachPoint.transform.SetParent(root.transform, false);
-            attachPoint.transform.localPosition = new Vector3(0f, 0f, -0.04f);
-            grabInteractable.attachTransform = attachPoint.transform;
+            var attachTransform = grabInteractable.attachTransform;
+            if (attachTransform == null)
+            {
+                attachTransform = pickupRoot.transform.Find(AttachPointObjectName);
+                if (attachTransform == null)
+                {
+                    var attachPointObject = new GameObject(AttachPointObjectName);
+                    attachTransform = attachPointObject.transform;
+                }
+            }
 
-            EnsureSwingWeapon(root, makeTriggerCollider: false, forceKinematic: false, defaultRadius: 0.26f);
-            ConfigureRuntimeWeaponModifiers(root, WeaponKind.Shield, requiresShieldUnlock: true);
-            SetupLoosePickup(root, grabInteractable);
+            attachTransform.SetParent(pickupRoot.transform, false);
+            attachTransform.localPosition = shieldLayout.AttachLocalPosition;
+            attachTransform.localRotation = shieldLayout.AttachLocalRotation;
+            grabInteractable.attachTransform = attachTransform;
         }
 
         void ResolveChainGripPose(Transform root, out Vector3 gripCenter, out float gripRadius, out float gripHeight)
@@ -5363,11 +6836,11 @@ namespace VRCombat.Core
             var rigidbody = root.AddComponent<Rigidbody>();
             var chainDefinition = GetWeaponDefinitionOrDefault(WeaponKind.Chain, 0.92f);
             rigidbody.mass = chainDefinition.RigidbodyMass;
-            rigidbody.linearDamping = chainDefinition.RigidbodyLinearDamping;
-            rigidbody.angularDamping = chainDefinition.RigidbodyAngularDamping;
+            rigidbody.linearDamping = 0.018f;
+            rigidbody.angularDamping = 0.028f;
             rigidbody.solverIterations = 18;
             rigidbody.solverVelocityIterations = 8;
-            rigidbody.maxAngularVelocity = 220f;
+            rigidbody.maxAngularVelocity = 420f;
             rigidbody.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
             rigidbody.interpolation = RigidbodyInterpolation.Interpolate;
 
@@ -5377,7 +6850,7 @@ namespace VRCombat.Core
                 allowDynamicAttach: true,
                 movementType: XRBaseInteractable.MovementType.Instantaneous);
             grabInteractable.throwOnDetach = false;
-            ConfigureWeaponHoldFollow(grabInteractable);
+            ConfigureChainHoldFollow(grabInteractable);
 
             var attachPoint = new GameObject(AttachPointObjectName);
             attachPoint.transform.SetParent(root.transform, false);
@@ -5387,7 +6860,7 @@ namespace VRCombat.Core
             var riggedChainWeapon = InitializeRuntimeChainWeapon(root, rigidbody, collider, chainDefinition);
 
             ConfigureRuntimeWeaponModifiers(root, WeaponKind.Chain);
-            SetupLoosePickup(root, grabInteractable, riggedChainWeapon, keepKinematicWhileHeld: false);
+            SetupLoosePickup(root, grabInteractable, riggedChainWeapon, keepKinematicWhileHeld: true);
         }
 
         RiggedChainWeapon InitializeRuntimeChainWeapon(
@@ -5578,7 +7051,8 @@ namespace VRCombat.Core
 
             barrelAxisLocal.Normalize();
             barrelUpLocal = Vector3.ProjectOnPlane(barrelUpLocal, barrelAxisLocal).normalized;
-            var raycastLocalRotation = Quaternion.LookRotation(barrelAxisLocal, barrelUpLocal);
+            var fireAxisLocal = -barrelAxisLocal;
+            var raycastLocalRotation = Quaternion.LookRotation(fireAxisLocal, barrelUpLocal);
 
             var raycastOriginTransform = FindChildByNameToken(root.transform, "raycast origin");
             if (raycastOriginTransform == null)
@@ -5593,7 +7067,7 @@ namespace VRCombat.Core
 
             var bulletVisual = bulletTransform != null
                 ? bulletTransform.gameObject
-                : CreateRuntimeFlintlockBulletFallback(root.transform, raycastLocalPosition, barrelAxisLocal);
+                : CreateRuntimeFlintlockBulletFallback(root.transform, raycastLocalPosition, fireAxisLocal);
             var visualTrigger = triggerTransform;
 
             var weapon = root.GetComponent<FlintlockWeapon>();
@@ -5812,13 +7286,14 @@ namespace VRCombat.Core
 
             grabInteractable.selectEntered.AddListener(args =>
             {
-                if (mountedPickup != null)
-                    mountedPickup.SetState(RuntimeMountedPickupState.Held);
                 var side = HandleHandReplacementEquipped(grabInteractable, args);
                 SetPickupCollisionsIgnoredWithPlayer(grabInteractable, true);
                 SetPickupCollisionsIgnoredWithOtherHeldPickups(grabInteractable, true);
                 SetHandSideVisualSuppressed(side, true);
                 SetHandSideCollidersSuppressed(side, true);
+                SetPickupIgnoredForGrounding(grabInteractable, true);
+                if (mountedPickup != null)
+                    mountedPickup.SetState(RuntimeMountedPickupState.Held);
             });
 
             grabInteractable.selectExited.AddListener(args =>
@@ -5830,6 +7305,7 @@ namespace VRCombat.Core
                 SetHandSideCollidersSuppressed(side, false);
                 if (mountedPickup != null)
                     mountedPickup.SetState(RuntimeMountedPickupState.Dropped);
+                SetPickupIgnoredForGrounding(grabInteractable, false);
             });
         }
 
@@ -5855,6 +7331,76 @@ namespace VRCombat.Core
                     Physics.IgnoreCollision(pickupCollider, playerCollider, ignore);
                 }
             }
+        }
+
+        void SetPickupIgnoredForGrounding(XRGrabInteractable grabInteractable, bool ignore)
+        {
+            if (grabInteractable == null)
+                return;
+
+            if (!ignore)
+            {
+                RestorePickupLayers(grabInteractable);
+                return;
+            }
+
+            var ignoreRaycastLayer = LayerMask.NameToLayer("Ignore Raycast");
+            if (ignoreRaycastLayer < 0)
+                return;
+
+            if (!m_HeldPickupOriginalLayers.TryGetValue(grabInteractable, out var originalLayers))
+            {
+                originalLayers = new Dictionary<Transform, int>();
+                m_HeldPickupOriginalLayers[grabInteractable] = originalLayers;
+            }
+
+            var transforms = grabInteractable.GetComponentsInChildren<Transform>(true);
+            for (var i = 0; i < transforms.Length; i++)
+            {
+                var child = transforms[i];
+                if (child == null)
+                    continue;
+
+                if (!originalLayers.ContainsKey(child))
+                    originalLayers.Add(child, child.gameObject.layer);
+
+                child.gameObject.layer = ignoreRaycastLayer;
+            }
+        }
+
+        void RestorePickupLayers(XRGrabInteractable grabInteractable)
+        {
+            if (grabInteractable == null)
+                return;
+
+            if (!m_HeldPickupOriginalLayers.TryGetValue(grabInteractable, out var originalLayers))
+                return;
+
+            foreach (var pair in originalLayers)
+            {
+                if (pair.Key != null)
+                    pair.Key.gameObject.layer = pair.Value;
+            }
+
+            m_HeldPickupOriginalLayers.Remove(grabInteractable);
+        }
+
+        void RestoreAllHeldPickupLayers()
+        {
+            foreach (var pair in m_HeldPickupOriginalLayers)
+            {
+                var originalLayers = pair.Value;
+                if (originalLayers == null)
+                    continue;
+
+                foreach (var layerPair in originalLayers)
+                {
+                    if (layerPair.Key != null)
+                        layerPair.Key.gameObject.layer = layerPair.Value;
+                }
+            }
+
+            m_HeldPickupOriginalLayers.Clear();
         }
 
         void SetPickupCollisionsIgnoredWithOtherHeldPickups(XRGrabInteractable pickup, bool ignore)
@@ -6266,6 +7812,7 @@ namespace VRCombat.Core
 
         void RestoreSuppressedHandRenderers()
         {
+            RestoreAllHeldPickupLayers();
             RestoreRendererList(m_LeftSuppressedHandRenderers);
             RestoreRendererList(m_RightSuppressedHandRenderers);
             RestoreSuppressedHandColliders();
@@ -6339,28 +7886,62 @@ namespace VRCombat.Core
             {
                 m_HitsTakenThisWave = 0;
                 var enemiesThisWave = Mathf.Max(1, m_StartingEnemiesPerWave + (m_CurrentWave - 1) * m_EnemiesAddedPerWave);
+                var shouldSpawnBossThisWave = ShouldSpawnBossForWave(m_CurrentWave);
+                var totalEnemiesThisWave = enemiesThisWave + (shouldSpawnBossThisWave ? 1 : 0);
                 m_CurrentFlowRate = Mathf.Max(
                     0.08f,
                     m_StartingFlowRatePerSecond + (m_CurrentWave - 1) * m_FlowRateIncreasePerWave);
 
                 var spawnInterval = 1f / m_CurrentFlowRate;
-                m_CombatHud?.SetWaveInfo(m_CurrentWave, enemiesThisWave, m_CurrentFlowRate);
+                m_CombatHud?.SetWaveInfo(m_CurrentWave, totalEnemiesThisWave, m_CurrentFlowRate);
                 m_CombatHud?.ShowBanner($"Wave {m_CurrentWave} starting", 2f);
 
                 m_ActiveWaveEnemies.Clear();
-                for (var i = 0; i < enemiesThisWave; i++)
+                if (shouldSpawnBossThisWave)
+                {
+                    var boss = SpawnWaveBoss();
+                    if (boss != null)
+                        m_ActiveWaveEnemies.Add(boss);
+                    else
+                        Debug.LogWarning("[VRCombat] Wave 15 boss spawn failed. Continuing the wave to avoid stalling progression.", this);
+                }
+
+                var spawnedThisWave = 0;
+                var spawnAttempts = 0;
+                var maxSpawnAttempts = Mathf.Max(24, enemiesThisWave * 8);
+                while (spawnedThisWave < enemiesThisWave)
                 {
                     if (m_IsGameOver)
                         yield break;
 
-                    var enemy = SpawnSingleEnemy();
+                    spawnAttempts++;
+                    var enemy = SpawnSingleEnemy(logFailure: false);
                     if (enemy != null)
+                    {
                         m_ActiveWaveEnemies.Add(enemy);
+                        spawnedThisWave++;
+                    }
 
-                    var remainingToSpawn = enemiesThisWave - (i + 1);
+                    var remainingToSpawn = enemiesThisWave - spawnedThisWave;
                     var aliveNow = AliveEnemyCount();
                     m_CombatHud?.SetWaveInfo(m_CurrentWave, aliveNow + remainingToSpawn, m_CurrentFlowRate);
-                    yield return new WaitForSeconds(spawnInterval);
+                    if (enemy != null)
+                    {
+                        spawnAttempts = 0;
+                        yield return new WaitForSeconds(spawnInterval);
+                    }
+                    else
+                    {
+                        if (spawnAttempts >= maxSpawnAttempts)
+                        {
+                            ConfigureArenaSurface();
+                            spawnAttempts = 0;
+                            yield return new WaitForSeconds(0.25f);
+                            continue;
+                        }
+
+                        yield return null;
+                    }
                 }
 
                 while (!m_IsGameOver)
@@ -6378,6 +7959,18 @@ namespace VRCombat.Core
 
                 var nextWave = m_CurrentWave + 1;
                 m_PlayerDamageReceiver?.RestoreFullHealth();
+                if (ShouldShowVictoryAfterWave(m_CurrentWave))
+                {
+                    yield return HandleVictoryTransition(nextWave);
+                    if (m_IsGameOver || m_IsRestarting)
+                        yield break;
+                    if (!m_ShouldContinueAfterVictory)
+                        yield break;
+
+                    m_CurrentWave = nextWave;
+                    continue;
+                }
+
                 if (TryGetWaveUnlockEncounter(m_CurrentWave, out var waveUnlockEncounter))
                 {
                     yield return HandleWaveMilestoneTransition(m_CurrentWave, nextWave, waveUnlockEncounter);
@@ -6392,6 +7985,67 @@ namespace VRCombat.Core
                 yield return new WaitForSeconds(m_TimeBetweenWavesSeconds);
                 m_CurrentWave = nextWave;
             }
+        }
+
+        bool ShouldSpawnBossForWave(int wave)
+        {
+            return wave == BossWaveNumber &&
+                   !m_EndlessModeActive &&
+                   !m_HasShownVictoryChoice;
+        }
+
+        bool ShouldShowVictoryAfterWave(int wave)
+        {
+            return wave == BossWaveNumber &&
+                   !m_EndlessModeActive &&
+                   !m_HasShownVictoryChoice;
+        }
+
+        IEnumerator HandleVictoryTransition(int nextWave)
+        {
+            m_HasShownVictoryChoice = true;
+            m_IsVictoryMenuOpen = true;
+            m_ShouldContinueAfterVictory = false;
+            SetPauseMenuOpen(false);
+            Time.timeScale = 0f;
+            m_CombatHud?.ShowVictoryPanel();
+            RefreshRunInteractionState();
+
+            while (!m_IsGameOver && !m_IsRestarting && m_IsVictoryMenuOpen)
+                yield return null;
+
+            if (m_IsGameOver || m_IsRestarting || !m_ShouldContinueAfterVictory)
+                yield break;
+
+            m_CombatHud?.ShowBanner($"Endless mode. Wave {nextWave} incoming", 2.2f);
+            yield return new WaitForSecondsRealtime(Mathf.Min(1.25f, m_TimeBetweenWavesSeconds));
+        }
+
+        CapsuleEnemy SpawnWaveBoss()
+        {
+            var seedPosition = GetEnemySpawnPosition();
+            if (!TryResolveWaveEnemySpawnPosition(
+                    seedPosition,
+                    BossGoblinCapsuleRadius,
+                    BossGoblinCapsuleHeight,
+                    out var position))
+            {
+                Debug.LogWarning("[VRCombat] Skipping boss spawn because no safe spawn position was available.", this);
+                return null;
+            }
+
+            var boss = SpawnEnemyAt(
+                position,
+                EnemyRarity.Boss,
+                null,
+                BossGoblinModelResourcePath,
+                BossGoblinTargetHeight,
+                BossGoblinCapsuleRadius,
+                BossGoblinCapsuleHeight);
+            if (boss != null)
+                m_CombatHud?.ShowBanner("Boss goblin has entered the arena", 2.4f);
+
+            return boss;
         }
 
         bool TryGetWaveUnlockEncounter(int clearedWave, out ArenaOpeningEncounter encounter)
@@ -6463,7 +8117,7 @@ namespace VRCombat.Core
         CapsuleEnemy SpawnMilestoneKeyCarrier()
         {
             var seedPosition = GetEnemySpawnPosition();
-            if (!TryResolveCombatEnemySpawnPosition(seedPosition, 0.28f, 1.7f, out var position))
+            if (!TryResolveWaveEnemySpawnPosition(seedPosition, 0.28f, 1.7f, out var position))
             {
                 Debug.LogWarning("[VRCombat] Skipping milestone key carrier spawn because no safe spawn position was available.", this);
                 return null;
@@ -6542,16 +8196,26 @@ namespace VRCombat.Core
             return EnemyRarity.Common;
         }
 
-        public CapsuleEnemy SpawnEnemyAt(Vector3 position, EnemyRarity rarity, GameObject keyPrefab = null)
+        public CapsuleEnemy SpawnEnemyAt(
+            Vector3 position,
+            EnemyRarity rarity,
+            GameObject keyPrefab = null,
+            string modelResourcePath = GoblinModelResourcePath,
+            float targetVisualHeight = 1.65f,
+            float capsuleRadius = 0.28f,
+            float capsuleHeight = 1.7f)
         {
-            var enemyObject = new GameObject("Goblin Enemy");
+            var isBoss = rarity == EnemyRarity.Boss;
+            var resolvedRadius = Mathf.Max(0.05f, capsuleRadius);
+            var resolvedHeight = Mathf.Max(resolvedRadius * 2f, capsuleHeight);
+            var enemyObject = new GameObject(isBoss ? "Boss Goblin Enemy" : "Goblin Enemy");
             enemyObject.transform.position = position;
             RegisterRuntimeObject(enemyObject);
 
             var collider = enemyObject.AddComponent<CapsuleCollider>();
-            collider.center = new Vector3(0f, 0.95f, 0f);
-            collider.radius = 0.28f;
-            collider.height = 1.7f;
+            collider.center = new Vector3(0f, resolvedHeight * 0.5f + 0.1f, 0f);
+            collider.radius = resolvedRadius;
+            collider.height = resolvedHeight;
 
             var rigidbody = enemyObject.AddComponent<Rigidbody>();
             rigidbody.useGravity = true;
@@ -6561,11 +8225,16 @@ namespace VRCombat.Core
 
             var enemy = enemyObject.AddComponent<CapsuleEnemy>();
             enemy.SetPlayerTarget(m_PlayerCamera.transform, m_PlayerDamageReceiver);
-            enemy.ConfigureGrabDistance(m_MaxPhysicalGrabDistance);
+            enemy.ConfigureGrabDistance(isBoss ? Mathf.Max(m_MaxPhysicalGrabDistance, 1.6f) : m_MaxPhysicalGrabDistance);
             enemy.SetRarity(rarity, keyPrefab);
             enemy.Died += HandleEnemyDied;
 
-            var enemyRenderer = CreateGoblinVisual(enemyObject.transform, out var animationDriver);
+            var enemyRenderer = CreateGoblinVisual(
+                enemyObject.transform,
+                out var animationDriver,
+                modelResourcePath,
+                targetVisualHeight,
+                isBoss);
             if (enemyRenderer != null)
                 enemy.AssignRenderer(enemyRenderer);
             if (animationDriver != null)
@@ -6576,12 +8245,13 @@ namespace VRCombat.Core
             return enemy;
         }
 
-        CapsuleEnemy SpawnSingleEnemy()
+        CapsuleEnemy SpawnSingleEnemy(bool logFailure = true)
         {
             var seedPosition = GetEnemySpawnPosition();
-            if (!TryResolveCombatEnemySpawnPosition(seedPosition, 0.28f, 1.7f, out var position))
+            if (!TryResolveWaveEnemySpawnPosition(seedPosition, 0.28f, 1.7f, out var position))
             {
-                Debug.LogWarning("[VRCombat] Skipping enemy spawn because no safe spawn position was available.", this);
+                if (logFailure)
+                    Debug.LogWarning("[VRCombat] Skipping enemy spawn because no safe spawn position was available.", this);
                 return null;
             }
 
@@ -6599,31 +8269,38 @@ namespace VRCombat.Core
             m_RunProgressionController?.AwardXp(EnemyXpReward);
         }
 
-        Renderer CreateGoblinVisual(Transform parent, out GoblinAnimationDriver animationDriver)
+        Renderer CreateGoblinVisual(
+            Transform parent,
+            out GoblinAnimationDriver animationDriver,
+            string modelResourcePath = GoblinModelResourcePath,
+            float targetHeight = 1.65f,
+            bool useBossAnimationSet = false)
         {
             animationDriver = null;
             if (parent == null)
                 return null;
 
-            var goblinPrefab = Resources.Load<GameObject>(GoblinModelResourcePath);
+            var goblinPrefab = Resources.Load<GameObject>(string.IsNullOrWhiteSpace(modelResourcePath) ? GoblinModelResourcePath : modelResourcePath);
             if (goblinPrefab == null)
             {
                 var fallback = GameObject.CreatePrimitive(PrimitiveType.Capsule);
-                fallback.name = "Goblin Visual";
+                fallback.name = useBossAnimationSet ? "Boss Goblin Visual" : "Goblin Visual";
                 fallback.transform.SetParent(parent, false);
-                fallback.transform.localPosition = new Vector3(0f, 0.95f, 0f);
+                fallback.transform.localPosition = new Vector3(0f, Mathf.Max(0.1f, targetHeight) * 0.5f + 0.1f, 0f);
                 fallback.transform.localRotation = Quaternion.identity;
-                fallback.transform.localScale = new Vector3(0.5f, 1f, 0.5f);
+                var fallbackHeight = Mathf.Max(0.1f, targetHeight);
+                var fallbackScale = fallbackHeight / 1.65f;
+                fallback.transform.localScale = new Vector3(0.5f * fallbackScale, fallbackHeight * 0.5f, 0.5f * fallbackScale);
                 ApplyMaterial(fallback, GetOrCreateEnemyMaterial());
                 return fallback.GetComponent<Renderer>();
             }
 
             var visualRoot = Instantiate(goblinPrefab, parent, false);
-            visualRoot.name = "Goblin Visual";
+            visualRoot.name = useBossAnimationSet ? "Boss Goblin Visual" : "Goblin Visual";
             StripImportedSceneComponents(visualRoot, keepAnimators: true);
             StripImportedColliders(visualRoot);
             RuntimeCombatModelMaterialBinder.Apply(visualRoot, GetOrCreateEnemyMaterial());
-            ScaleImportedCharacterToHeight(visualRoot.transform, 1.65f);
+            ScaleImportedCharacterToHeight(visualRoot.transform, Mathf.Max(0.5f, targetHeight));
             AlignCharacterFeetToGround(visualRoot.transform);
 
             var animator = visualRoot.GetComponentInChildren<Animator>(true);
@@ -6636,7 +8313,9 @@ namespace VRCombat.Core
                 animationDriver = animator.gameObject.GetComponent<GoblinAnimationDriver>();
                 if (animationDriver == null)
                     animationDriver = animator.gameObject.AddComponent<GoblinAnimationDriver>();
-                animationDriver.Configure(ResolveGoblinLocomotionClip(), ResolveGoblinAttackClip());
+                animationDriver.Configure(
+                    useBossAnimationSet ? ResolveBossLocomotionClip() : ResolveGoblinLocomotionClip(),
+                    useBossAnimationSet ? ResolveBossAttackClip() : ResolveGoblinAttackClip());
             }
 
             var skinnedRenderer = visualRoot.GetComponentInChildren<SkinnedMeshRenderer>(true);
@@ -6658,6 +8337,20 @@ namespace VRCombat.Core
         {
             return ResolvePreferredGoblinClip(
                 preferredResourcePaths: new[] { "CombatModels/Mutant Punch", "CombatModels/Zombie Punching", "CombatModels/HobGoblin", "CombatModels/Goblin" },
+                preferAttackClip: true);
+        }
+
+        static AnimationClip ResolveBossLocomotionClip()
+        {
+            return ResolvePreferredGoblinClip(
+                preferredResourcePaths: new[] { "CombatModels/WalkingHumanoid", "CombatModels/Walking", "CombatModels/HobGoblin", "CombatModels/Goblin" },
+                preferAttackClip: false);
+        }
+
+        static AnimationClip ResolveBossAttackClip()
+        {
+            return ResolvePreferredGoblinClip(
+                preferredResourcePaths: new[] { "CombatModels/Mutant Punch", "CombatModels/HobGoblin", "CombatModels/Zombie Punching", "CombatModels/Goblin" },
                 preferAttackClip: true);
         }
 
@@ -6758,7 +8451,28 @@ namespace VRCombat.Core
 
         Vector3 GetEnemySpawnPosition()
         {
-            var center = m_HasKillZoneCenter ? m_KillZoneCenter : m_PlayerCamera.transform.position;
+            if (m_ArenaPlatformSurfaceColliders.Count == 0)
+                ConfigureArenaSurface();
+
+            if (TryGetBoundsFromColliders(m_ArenaPlatformSurfaceColliders, out var platformBounds))
+            {
+                var horizontalPadding = Mathf.Max(0.35f, BossGoblinCapsuleRadius + 0.2f);
+                var minX = platformBounds.min.x + horizontalPadding;
+                var maxX = platformBounds.max.x - horizontalPadding;
+                var minZ = platformBounds.min.z + horizontalPadding;
+                var maxZ = platformBounds.max.z - horizontalPadding;
+                if (minX < maxX && minZ < maxZ)
+                {
+                    return new Vector3(
+                        UnityEngine.Random.Range(minX, maxX),
+                        platformBounds.max.y + ArenaGroundSnapProbeHeight + 1.5f,
+                        UnityEngine.Random.Range(minZ, maxZ));
+                }
+            }
+
+            var center = m_HasKillZoneCenter
+                ? m_KillZoneCenter
+                : m_PlayerCamera != null ? m_PlayerCamera.transform.position : transform.position;
             center.y += m_EnemySpawnVerticalOffset;
 
             var randomAngleDegrees = UnityEngine.Random.Range(0f, 360f);
@@ -6976,7 +8690,7 @@ namespace VRCombat.Core
                 WeaponKind.Flintlock => new Vector3(0f, 0.01f, -0.035f),
                 WeaponKind.Mace => Vector3.zero,
                 WeaponKind.Spear => new Vector3(0f, 0f, 0f),
-                WeaponKind.Sword => new Vector3(0f, 0f, -0.09f),
+                WeaponKind.Sword => new Vector3(0f, -0.012f, -0.12f),
                 _ => Vector3.zero
             };
         }
@@ -6989,7 +8703,7 @@ namespace VRCombat.Core
                 WeaponKind.Flintlock => Quaternion.Euler(0f, 180f, 0f),
                 WeaponKind.Mace => Quaternion.Euler(75f, 180f, 0f),
                 WeaponKind.Spear => Quaternion.Euler(75f, 180f, 0f),
-                WeaponKind.Sword => Quaternion.Euler(75f, 0f, 0f),
+                WeaponKind.Sword => Quaternion.Euler(70f, 0f, 0f),
                 _ => Quaternion.identity
             };
         }
@@ -7012,10 +8726,10 @@ namespace VRCombat.Core
                 return;
 
             ConfigureWeaponHoldFollow(grabInteractable);
-            grabInteractable.velocityDamping = 0.08f;
-            grabInteractable.velocityScale = 1.5f;
-            grabInteractable.angularVelocityDamping = 0.08f;
-            grabInteractable.angularVelocityScale = 1.45f;
+            grabInteractable.velocityDamping = 0.04f;
+            grabInteractable.velocityScale = 1.85f;
+            grabInteractable.angularVelocityDamping = 0.04f;
+            grabInteractable.angularVelocityScale = 1.8f;
         }
 
         static WeaponDefinition GetWeaponDefinitionOrDefault(WeaponKind weaponKind, float fallbackLength)
@@ -8187,6 +9901,7 @@ namespace VRCombat.Core
             interactable.smoothScale = false;
 
             EnsureMaxPhysicalGrabDistanceFilter(interactable);
+            EnsureSingleOwnerWhileHeldSelectFilter(interactable);
         }
 
         void ConfigureExistingGrabInteractables()
@@ -8199,6 +9914,7 @@ namespace VRCombat.Core
                 if (!IsCombatPickupInteractable(grabInteractable))
                     continue;
 
+                EnsureSingleOwnerWhileHeldSelectFilter(grabInteractable);
                 AddPickupSelectListeners(
                     grabInteractable,
                     grabInteractable.GetComponent<RuntimeMountedPickup>() ?? grabInteractable.GetComponentInParent<RuntimeMountedPickup>());
@@ -8271,6 +9987,20 @@ namespace VRCombat.Core
                 filter = interactable.gameObject.AddComponent<MaxGrabDistanceSelectFilter>();
 
             filter.Configure(m_MaxPhysicalGrabDistance);
+            AddSelectFilterIfMissing(interactable, filter);
+        }
+
+        void EnsureSingleOwnerWhileHeldSelectFilter(XRGrabInteractable interactable)
+        {
+            if (interactable == null)
+                return;
+
+            interactable.selectMode = InteractableSelectMode.Single;
+
+            var filter = interactable.GetComponent<SingleOwnerWhileHeldSelectFilter>();
+            if (filter == null)
+                filter = interactable.gameObject.AddComponent<SingleOwnerWhileHeldSelectFilter>();
+
             AddSelectFilterIfMissing(interactable, filter);
         }
 

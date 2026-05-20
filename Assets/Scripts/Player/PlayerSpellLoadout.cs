@@ -311,13 +311,13 @@ namespace VRCombat.Player
                 playerRoot: m_PlayerRoot,
                 speed: 12f,
                 lifetimeSeconds: 2.2f,
-                damage: 12f * damageMultiplier,
+                damage: 7f * damageMultiplier,
                 hitRadius: 0.16f,
                 color: new Color(1f, 0.35f, 0.08f, 1f),
                 onHit: damageable =>
                 {
                     if (damageable is IStatusEffectTarget statusTarget)
-                        statusTarget.ApplyBurn(5f * damageMultiplier, 4f, gameObject);
+                        statusTarget.ApplyBurn(10f * damageMultiplier, 5f, gameObject);
                 },
                 visualKind: SpellProjectileVisualKind.Fireball);
         }
@@ -452,6 +452,14 @@ namespace VRCombat.Player
             lineRenderer.sharedMaterial = SpellProjectile.CreateSpellMaterial(new Color(0.76f, 0.9f, 1f, 1f));
             lineRenderer.startColor = new Color(0.95f, 0.98f, 1f, 1f);
             lineRenderer.endColor = new Color(0.45f, 0.7f, 1f, 0.35f);
+            RuntimeLightFade.CreatePointLight(
+                arcObject,
+                (origin + target) * 0.5f,
+                new Color(0.55f, 0.78f, 1f, 1f),
+                range: 6.5f,
+                intensity: 6.2f,
+                lifetimeSeconds: 0.14f,
+                parentToTarget: false);
             StartCoroutine(DestroyAfterSeconds(arcObject, 0.12f));
         }
 
@@ -513,6 +521,8 @@ namespace VRCombat.Player
         Renderer m_Renderer;
         SpellProjectileVisualKind m_VisualKind;
         Color m_Color;
+        Light m_SpellLight;
+        float m_BaseLightIntensity;
 
         public void Initialize(
             Transform playerRoot,
@@ -535,10 +545,13 @@ namespace VRCombat.Player
             m_Color = color;
 
             BuildVisual(visualKind, color);
+            ConfigureProjectileLight(visualKind, color);
         }
 
         void Update()
         {
+            UpdateProjectileLight();
+
             var displacement = transform.forward * (m_Speed * Time.deltaTime);
             var nextPosition = transform.position + displacement;
 
@@ -570,6 +583,15 @@ namespace VRCombat.Player
             m_LifetimeRemaining -= Time.deltaTime;
             if (m_LifetimeRemaining <= 0f)
                 Destroy(gameObject);
+        }
+
+        void UpdateProjectileLight()
+        {
+            if (m_SpellLight == null)
+                return;
+
+            var flicker = Mathf.PerlinNoise(Time.time * 12.5f, transform.position.sqrMagnitude * 0.17f);
+            m_SpellLight.intensity = m_BaseLightIntensity * Mathf.Lerp(0.82f, 1.15f, flicker);
         }
 
         void BuildVisual(SpellProjectileVisualKind visualKind, Color color)
@@ -662,6 +684,34 @@ namespace VRCombat.Player
                 m_Renderer.sharedMaterial = CreateSpellMaterial(color);
         }
 
+        void ConfigureProjectileLight(SpellProjectileVisualKind visualKind, Color color)
+        {
+            m_SpellLight = gameObject.AddComponent<Light>();
+            m_SpellLight.type = LightType.Point;
+            m_SpellLight.color = color;
+            m_SpellLight.renderMode = LightRenderMode.ForcePixel;
+            m_SpellLight.shadows = LightShadows.None;
+            m_SpellLight.bounceIntensity = 0.8f;
+
+            switch (visualKind)
+            {
+                case SpellProjectileVisualKind.Fireball:
+                    m_BaseLightIntensity = 4.9f;
+                    m_SpellLight.range = 5.4f;
+                    break;
+                case SpellProjectileVisualKind.Icicle:
+                    m_BaseLightIntensity = 2.1f;
+                    m_SpellLight.range = 3.7f;
+                    break;
+                default:
+                    m_BaseLightIntensity = 2f;
+                    m_SpellLight.range = 3f;
+                    break;
+            }
+
+            m_SpellLight.intensity = m_BaseLightIntensity;
+        }
+
         void HandleHit(Collider hitCollider, Vector3 hitPoint)
         {
             var damageable = hitCollider != null ? hitCollider.GetComponentInParent<IDamageable>() : null;
@@ -717,6 +767,14 @@ namespace VRCombat.Player
             }
 
             ps.Play();
+            RuntimeLightFade.CreatePointLight(
+                explosionObject,
+                hitPoint,
+                m_Color,
+                m_VisualKind == SpellProjectileVisualKind.Fireball ? 6f : 4.5f,
+                m_VisualKind == SpellProjectileVisualKind.Fireball ? 7.2f : 3.8f,
+                0.55f,
+                parentToTarget: true);
             Destroy(explosionObject, 1.0f);
         }
 
@@ -747,6 +805,80 @@ namespace VRCombat.Player
                 material.SetColor("_Color", color);
 
             return material;
+        }
+    }
+
+    sealed class RuntimeLightFade : MonoBehaviour
+    {
+        Light m_Light;
+        float m_InitialIntensity;
+        float m_LifetimeSeconds;
+        float m_Age;
+        bool m_DestroyOwnerWhenExpired;
+
+        public static Light CreatePointLight(
+            GameObject owner,
+            Vector3 worldPosition,
+            Color color,
+            float range,
+            float intensity,
+            float lifetimeSeconds,
+            bool parentToTarget)
+        {
+            if (owner == null)
+                return null;
+
+            var lightObject = parentToTarget ? owner : new GameObject($"{owner.name} Light");
+            if (!parentToTarget)
+                lightObject.transform.SetParent(null, true);
+
+            lightObject.transform.position = worldPosition;
+            var light = lightObject.GetComponent<Light>() ?? lightObject.AddComponent<Light>();
+            light.enabled = true;
+            light.type = LightType.Point;
+            light.color = color;
+            light.range = Mathf.Max(0.1f, range);
+            light.intensity = Mathf.Max(0f, intensity);
+            light.shadows = LightShadows.None;
+            light.bounceIntensity = 0.8f;
+            light.renderMode = LightRenderMode.ForcePixel;
+
+            var fade = lightObject.GetComponent<RuntimeLightFade>() ?? lightObject.AddComponent<RuntimeLightFade>();
+            fade.Initialize(light, Mathf.Max(0.01f, lifetimeSeconds), !parentToTarget);
+            return light;
+        }
+
+        void Initialize(Light lightSource, float lifetimeSeconds, bool destroyOwnerWhenExpired)
+        {
+            m_Light = lightSource;
+            m_InitialIntensity = lightSource != null ? lightSource.intensity : 0f;
+            m_LifetimeSeconds = lifetimeSeconds;
+            m_DestroyOwnerWhenExpired = destroyOwnerWhenExpired;
+            m_Age = 0f;
+        }
+
+        void Update()
+        {
+            if (m_Light == null)
+            {
+                Destroy(this);
+                return;
+            }
+
+            m_Age += Time.deltaTime;
+            var remaining = Mathf.Clamp01(1f - m_Age / Mathf.Max(0.01f, m_LifetimeSeconds));
+            m_Light.intensity = m_InitialIntensity * remaining * remaining;
+
+            if (m_Age >= m_LifetimeSeconds)
+            {
+                if (m_Light != null)
+                    m_Light.enabled = false;
+
+                if (m_DestroyOwnerWhenExpired)
+                    Destroy(gameObject);
+                else
+                    Destroy(this);
+            }
         }
     }
 }

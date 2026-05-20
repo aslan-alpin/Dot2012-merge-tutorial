@@ -7,6 +7,7 @@ namespace VRCombat.Enemies
         Common,
         Uncommon,
         Rare,
-        Epic
+        Epic,
+        Boss
     }
 }

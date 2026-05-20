@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using UnityEngine;
 
 namespace VRCombat.Combat
@@ -14,6 +15,7 @@ namespace VRCombat.Combat
     {
         Rigidbody m_Rigidbody;
         RiggedChainWeapon m_RiggedChainWeapon;
+        readonly Dictionary<Transform, int> m_OriginalLayerByTransform = new Dictionary<Transform, int>();
         bool m_KeepKinematicWhileHeld;
         Vector3 m_MountedPosition;
         Quaternion m_MountedRotation = Quaternion.identity;
@@ -55,6 +57,11 @@ namespace VRCombat.Combat
             }
         }
 
+        void OnDisable()
+        {
+            RestoreOriginalLayers();
+        }
+
         void LateUpdate()
         {
             if (m_State != RuntimeMountedPickupState.Mounted || !m_HasMountedPose)
@@ -65,6 +72,8 @@ namespace VRCombat.Combat
 
         void ApplyMountedState()
         {
+            RestoreOriginalLayers();
+
             if (m_Rigidbody == null)
                 return;
 
@@ -90,6 +99,8 @@ namespace VRCombat.Combat
             if (m_Rigidbody == null)
                 return;
 
+            ApplyHeldQueryLayer();
+
             m_Rigidbody.isKinematic = m_KeepKinematicWhileHeld;
             m_Rigidbody.useGravity = false;
             m_Rigidbody.linearVelocity = Vector3.zero;
@@ -104,13 +115,15 @@ namespace VRCombat.Combat
 
             if (m_RiggedChainWeapon != null)
             {
-                m_RiggedChainWeapon.SetMountedState(false);
                 m_RiggedChainWeapon.SetHeldState(true);
+                m_RiggedChainWeapon.SetMountedState(false);
             }
         }
 
         void ApplyDroppedState()
         {
+            RestoreOriginalLayers();
+
             if (m_Rigidbody == null)
                 return;
 
@@ -122,9 +135,43 @@ namespace VRCombat.Combat
 
             if (m_RiggedChainWeapon != null)
             {
-                m_RiggedChainWeapon.SetMountedState(false);
                 m_RiggedChainWeapon.SetHeldState(false);
+                m_RiggedChainWeapon.SetMountedState(false);
             }
+        }
+
+        void ApplyHeldQueryLayer()
+        {
+            var ignoreRaycastLayer = LayerMask.NameToLayer("Ignore Raycast");
+            if (ignoreRaycastLayer < 0)
+                return;
+
+            var transforms = GetComponentsInChildren<Transform>(true);
+            for (var i = 0; i < transforms.Length; i++)
+            {
+                var child = transforms[i];
+                if (child == null)
+                    continue;
+
+                if (!m_OriginalLayerByTransform.ContainsKey(child))
+                    m_OriginalLayerByTransform.Add(child, child.gameObject.layer);
+
+                child.gameObject.layer = ignoreRaycastLayer;
+            }
+        }
+
+        void RestoreOriginalLayers()
+        {
+            if (m_OriginalLayerByTransform.Count == 0)
+                return;
+
+            foreach (var pair in m_OriginalLayerByTransform)
+            {
+                if (pair.Key != null)
+                    pair.Key.gameObject.layer = pair.Value;
+            }
+
+            m_OriginalLayerByTransform.Clear();
         }
     }
 }

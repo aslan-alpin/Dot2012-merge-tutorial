@@ -773,28 +773,18 @@ namespace VRCombat.Combat
 
         Vector3 GetFireOrigin()
         {
+            var fireDirection = GetFireDirection();
             var fireAnchor = GetFireAnchor();
             return fireAnchor != null
-                ? fireAnchor.position + GetFireDirection() * 0.002f
-                : transform.position + GetFireDirection() * 0.12f;
+                ? fireAnchor.position + fireDirection * 0.002f
+                : transform.position + fireDirection * 0.12f;
         }
 
         Vector3 GetFireDirection()
         {
-            if (raycastOrigin != null && raycastOrigin.forward.sqrMagnitude > MinimumDirectionMagnitude)
-                return raycastOrigin.forward.normalized;
-
-            if (TryGetBarrelDirection(out var barrelDirection))
-                return barrelDirection;
-
-            var fireAnchor = GetFireAnchor();
-            if (fireAnchor != null && fireAnchor.forward.sqrMagnitude > MinimumDirectionMagnitude)
-                return fireAnchor.forward.normalized;
-
-            if (transform.forward.sqrMagnitude > MinimumDirectionMagnitude)
-                return transform.forward.normalized;
-
-            return Vector3.forward;
+            return TryGetPrimaryFireDirection(out var fireDirection)
+                ? fireDirection
+                : Vector3.forward;
         }
 
         Transform GetFireAnchor()
@@ -811,12 +801,48 @@ namespace VRCombat.Combat
         bool TryGetBarrelDirection(out Vector3 direction)
         {
             direction = Vector3.zero;
-            if (raycastOrigin != null && raycastOrigin.forward.sqrMagnitude > MinimumDirectionMagnitude)
+            return TryGetMuzzleToBulletDirection(out direction);
+        }
+
+        bool TryGetPrimaryFireDirection(out Vector3 direction)
+        {
+            direction = Vector3.zero;
+
+            if (TryGetRaycastOriginDirection(out direction))
+                return true;
+
+            if (TryGetBarrelDirection(out direction))
+                return true;
+
+            var fireAnchor = GetFireAnchor();
+            if (fireAnchor != null && fireAnchor.forward.sqrMagnitude > MinimumDirectionMagnitude)
             {
-                direction = raycastOrigin.forward.normalized;
+                direction = fireAnchor.forward.normalized;
                 return true;
             }
 
+            if (transform.forward.sqrMagnitude > MinimumDirectionMagnitude)
+            {
+                direction = transform.forward.normalized;
+                return true;
+            }
+
+            return false;
+        }
+
+        bool TryGetRaycastOriginDirection(out Vector3 direction)
+        {
+            direction = Vector3.zero;
+            if (raycastOrigin == null || raycastOrigin.forward.sqrMagnitude <= MinimumDirectionMagnitude)
+                return false;
+
+            direction = raycastOrigin.forward.normalized;
+            return true;
+        }
+
+        bool TryGetMuzzleToBulletDirection(out Vector3 direction)
+        {
+            direction = Vector3.zero;
             if (raycastOrigin == null || attachedBullet == null)
                 return false;
 
@@ -836,7 +862,18 @@ namespace VRCombat.Combat
         {
             resolvedHit = default;
 
-            if (TryGetBarrelDirection(out var barrelDirection) &&
+            var hasOriginDirection = TryGetRaycastOriginDirection(out var originDirection);
+            if (hasOriginDirection &&
+                Vector3.Dot(primaryDirection, originDirection) > 0f &&
+                Vector3.Dot(primaryDirection, originDirection) < 0.995f &&
+                TryResolveShotImpact(origin, originDirection, maxDistance, ignoredColliders, out resolvedHit))
+            {
+                return true;
+            }
+
+            if (!hasOriginDirection &&
+                TryGetBarrelDirection(out var barrelDirection) &&
+                Vector3.Dot(primaryDirection, barrelDirection) > 0f &&
                 Vector3.Dot(primaryDirection, barrelDirection) < 0.995f &&
                 TryResolveShotImpact(origin, barrelDirection, maxDistance, ignoredColliders, out resolvedHit))
             {
@@ -846,7 +883,8 @@ namespace VRCombat.Combat
             if (transform.forward.sqrMagnitude > MinimumDirectionMagnitude)
             {
                 var fallbackDirection = transform.forward.normalized;
-                if (Vector3.Dot(primaryDirection, fallbackDirection) < 0.995f &&
+                if (Vector3.Dot(primaryDirection, fallbackDirection) > 0f &&
+                    Vector3.Dot(primaryDirection, fallbackDirection) < 0.995f &&
                     TryResolveShotImpact(origin, fallbackDirection, maxDistance, ignoredColliders, out resolvedHit))
                 {
                     return true;
@@ -1091,9 +1129,7 @@ namespace VRCombat.Combat
             if (parent == null || raycastOrigin == null)
                 return false;
 
-            var fireDirection = raycastOrigin.forward.sqrMagnitude > MinimumDirectionMagnitude
-                ? raycastOrigin.forward.normalized
-                : transform.forward.normalized;
+            var fireDirection = GetFireDirection();
             if (fireDirection.sqrMagnitude <= MinimumDirectionMagnitude)
                 return false;
 

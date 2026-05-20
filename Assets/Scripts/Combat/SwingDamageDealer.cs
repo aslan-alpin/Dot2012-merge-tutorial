@@ -262,6 +262,23 @@ namespace VRCombat.Combat
     }
 
     [DisallowMultipleComponent]
+    public class SingleOwnerWhileHeldSelectFilter : MonoBehaviour, IXRSelectFilter
+    {
+        public bool canProcess => isActiveAndEnabled;
+
+        public bool Process(IXRSelectInteractor interactor, IXRSelectInteractable interactable)
+        {
+            if (interactor == null || interactable == null)
+                return false;
+
+            if (!interactable.isSelected)
+                return true;
+
+            return interactor.IsSelecting(interactable);
+        }
+    }
+
+    [DisallowMultipleComponent]
     public class MaxGrabDistanceSelectFilter : MonoBehaviour, IXRSelectFilter
     {
         [SerializeField]

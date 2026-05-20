@@ -79,6 +79,10 @@ namespace UnityEngine.XR.Interaction.Toolkit.Samples.StarterAssets
         bool m_SmoothMotionEnabled;
 
         [SerializeField]
+        [Tooltip("If true, teleport aim remains available while continuous movement is enabled.")]
+        bool m_AllowTeleportWithSmoothMotion;
+
+        [SerializeField]
         [Tooltip("If true, continuous turn will be enabled. If false, snap turn will be enabled. Note: If smooth motion is enabled and enable strafe is enabled on the continuous move provider, turn will be overriden in favor of strafe.")]
         bool m_SmoothTurnEnabled;
 
@@ -106,6 +110,16 @@ namespace UnityEngine.XR.Interaction.Toolkit.Samples.StarterAssets
             set
             {
                 m_SmoothMotionEnabled = value;
+                UpdateLocomotionActions();
+            }
+        }
+
+        public bool allowTeleportWithSmoothMotion
+        {
+            get => m_AllowTeleportWithSmoothMotion;
+            set
+            {
+                m_AllowTeleportWithSmoothMotion = value;
                 UpdateLocomotionActions();
             }
         }
@@ -457,10 +471,12 @@ namespace UnityEngine.XR.Interaction.Toolkit.Samples.StarterAssets
 
         void UpdateLocomotionActions()
         {
+            var teleportEnabled = !m_SmoothMotionEnabled || m_AllowTeleportWithSmoothMotion;
+
             // Disable/enable Teleport and Turn when Move is enabled/disabled.
             SetEnabled(m_Move, m_SmoothMotionEnabled);
-            SetEnabled(m_TeleportMode, !m_SmoothMotionEnabled);
-            SetEnabled(m_TeleportModeCancel, !m_SmoothMotionEnabled);
+            SetEnabled(m_TeleportMode, teleportEnabled);
+            SetEnabled(m_TeleportModeCancel, teleportEnabled);
 
             // Disable ability to turn when using continuous movement
             SetEnabled(m_Turn, !m_SmoothMotionEnabled && m_SmoothTurnEnabled);

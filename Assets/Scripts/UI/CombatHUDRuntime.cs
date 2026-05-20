@@ -2,9 +2,12 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.EventSystems;
+using UnityEngine.InputSystem.UI;
 using UnityEngine.Rendering;
 using UnityEngine.UI;
 using UnityEngine.XR.Interaction.Toolkit.UI;
+using VRCombat.Core;
 
 namespace VRCombat.UI
 {
@@ -34,12 +37,17 @@ namespace VRCombat.UI
         Text m_DeathText;
         Button m_RestartButton;
         GameObject m_PausePanel;
+        GameObject m_DebugPanel;
+        GameObject m_VictoryPanel;
         GameObject m_UpgradePanel;
         Slider m_MovementVignetteSlider;
         Text m_MovementVignetteValueText;
+        Text m_DebugWaveValueText;
         Button m_MenuResumeButton;
-        Button m_MenuRestartButton;
+        Button m_MenuRespawnButton;
         Button m_MenuQuitButton;
+        Button m_VictoryRestartButton;
+        Button m_VictoryContinueButton;
         readonly Button[] m_UpgradeButtons = new Button[3];
         readonly Image[] m_UpgradeArtImages = new Image[3];
         readonly Text[] m_UpgradeTitleTexts = new Text[3];
@@ -54,7 +62,15 @@ namespace VRCombat.UI
         readonly Dictionary<int, Material> m_AlwaysOnTopMaterialCache = new Dictionary<int, Material>();
         Action<float> m_OnMovementVignetteChanged;
         Action m_OnResumeRequested;
+        Action m_OnContinueEndlessRequested;
+        Action<UpgradeKind> m_OnDebugGrantUpgradeRequested;
+        Action<WeaponKind> m_OnDebugGrantWeaponRequested;
+        Action<SpellKind> m_OnDebugUnlockSpellRequested;
+        Action m_OnDebugGrantAllWeaponsRequested;
+        Action m_OnDebugKillAllEnemiesRequested;
+        Action<int> m_OnDebugSetWaveRequested;
         Action<int> m_OnUpgradeSelected;
+        int m_DebugWaveNumber = 15;
         float m_UpgradeButtonsUnlockAtRealtime;
 
         [SerializeField]
@@ -75,13 +91,27 @@ namespace VRCombat.UI
             Action restartAction,
             Action quitAction,
             Action resumeAction,
+            Action continueEndlessAction,
             Action<float> movementVignetteChangedAction,
             float initialMovementVignetteStrength,
             Camera viewCamera,
-            Transform viewTransform)
+            Transform viewTransform,
+            Action<UpgradeKind> debugGrantUpgradeAction = null,
+            Action<WeaponKind> debugGrantWeaponAction = null,
+            Action<SpellKind> debugUnlockSpellAction = null,
+            Action debugGrantAllWeaponsAction = null,
+            Action debugKillAllEnemiesAction = null,
+            Action<int> debugSetWaveAction = null)
         {
             m_OnMovementVignetteChanged = movementVignetteChangedAction;
             m_OnResumeRequested = resumeAction;
+            m_OnContinueEndlessRequested = continueEndlessAction;
+            m_OnDebugGrantUpgradeRequested = debugGrantUpgradeAction;
+            m_OnDebugGrantWeaponRequested = debugGrantWeaponAction;
+            m_OnDebugUnlockSpellRequested = debugUnlockSpellAction;
+            m_OnDebugGrantAllWeaponsRequested = debugGrantAllWeaponsAction;
+            m_OnDebugKillAllEnemiesRequested = debugKillAllEnemiesAction;
+            m_OnDebugSetWaveRequested = debugSetWaveAction;
             m_ViewCamera = viewCamera;
             m_ViewTransform = viewTransform;
             BuildUi(restartAction, quitAction);
@@ -171,12 +201,90 @@ namespace VRCombat.UI
                 m_DeathPanel.SetActive(false);
         }
 
+        public void ShowVictoryPanel()
+        {
+            if (m_VictoryPanel == null)
+                return;
+
+            HideDeathPanel();
+            SetPauseMenuVisible(false);
+            HideUpgradeChoices();
+            m_VictoryPanel.SetActive(true);
+            m_VictoryPanel.transform.SetAsLastSibling();
+            if (m_VictoryRestartButton != null)
+                m_VictoryRestartButton.interactable = true;
+            if (m_VictoryContinueButton != null)
+                m_VictoryContinueButton.interactable = true;
+
+            EventSystem.current?.SetSelectedGameObject(m_VictoryContinueButton != null
+                ? m_VictoryContinueButton.gameObject
+                : m_VictoryRestartButton != null ? m_VictoryRestartButton.gameObject : null);
+        }
+
+        public void HideVictoryPanel()
+        {
+            if (m_VictoryPanel != null)
+                m_VictoryPanel.SetActive(false);
+        }
+
         public void SetPauseMenuVisible(bool visible)
         {
             if (m_PausePanel == null)
                 return;
 
             m_PausePanel.SetActive(visible);
+            if (!visible)
+            {
+                SetDebugPanelVisible(false);
+                return;
+            }
+
+            m_PausePanel.transform.SetAsLastSibling();
+            if (m_MenuResumeButton != null)
+                m_MenuResumeButton.interactable = true;
+            if (m_MenuRespawnButton != null)
+                m_MenuRespawnButton.interactable = true;
+            if (m_MenuQuitButton != null)
+                m_MenuQuitButton.interactable = true;
+
+            FocusPauseMenu();
+        }
+
+        public void ToggleDebugPanel()
+        {
+            if (m_DebugPanel == null || !IsPauseMenuVisible)
+                return;
+
+            SetDebugPanelVisible(!m_DebugPanel.activeSelf);
+        }
+
+        public void SetDebugPanelVisible(bool visible)
+        {
+            if (m_DebugPanel == null)
+                return;
+
+            m_DebugPanel.SetActive(visible);
+            if (!visible)
+                return;
+
+            m_DebugPanel.transform.SetAsLastSibling();
+            UpdateDebugWaveText();
+        }
+
+        public void FocusPauseMenu()
+        {
+            if (m_PausePanel == null || !m_PausePanel.activeSelf || m_MenuResumeButton == null)
+                return;
+
+            EventSystem.current?.SetSelectedGameObject(m_MenuResumeButton.gameObject);
+        }
+
+        public void AdjustPauseMenuVignette(float delta)
+        {
+            if (m_MovementVignetteSlider == null || Mathf.Approximately(delta, 0f))
+                return;
+
+            SetMovementVignetteStrength(m_MovementVignetteSlider.value + delta, notify: true);
         }
 
         public void ShowUpgradeChoices(CombatHudUpgradeChoice[] choices, Action<int> onSelected)
@@ -192,6 +300,7 @@ namespace VRCombat.UI
 
             m_OnUpgradeSelected = onSelected;
             m_UpgradePanel.SetActive(true);
+            m_UpgradePanel.transform.SetAsLastSibling();
             m_UpgradeButtonsUnlockAtRealtime = Time.realtimeSinceStartup + Mathf.Max(0f, m_UpgradeSelectionArmDelaySeconds);
 
             for (var i = 0; i < m_UpgradeButtons.Length; i++)
@@ -216,6 +325,7 @@ namespace VRCombat.UI
             }
 
             m_UpgradeUnlockRoutine = StartCoroutine(EnableUpgradeButtonsAfterDelayRealtime(choices.Length));
+            EventSystem.current?.SetSelectedGameObject(m_UpgradeButtons[0] != null ? m_UpgradeButtons[0].gameObject : null);
         }
 
         public void HideUpgradeChoices()
@@ -287,7 +397,9 @@ namespace VRCombat.UI
                 m_BannerText.enabled = false;
 
             HideDeathPanel();
+            HideVictoryPanel();
             SetPauseMenuVisible(false);
+            SetDebugPanelVisible(false);
             HideUpgradeChoices();
             SetFadeOverlayAlpha(0f);
         }
@@ -351,6 +463,7 @@ namespace VRCombat.UI
 
             canvasObject.AddComponent<GraphicRaycaster>();
             canvasObject.AddComponent<TrackedDeviceGraphicRaycaster>();
+            EnsureEventSystem();
 
             var canvasRect = canvas.GetComponent<RectTransform>();
             canvasRect.sizeDelta = new Vector2(1400f, 760f);
@@ -465,7 +578,7 @@ namespace VRCombat.UI
             pausePanelImage.color = new Color(0f, 0f, 0f, 0.88f);
 
             var pauseTitle = CreateText("PauseTitle", m_PausePanel.transform, font, 54, TextAnchor.MiddleCenter);
-            pauseTitle.text = "Menu";
+            pauseTitle.text = "Paused";
             var pauseTitleRect = pauseTitle.rectTransform;
             pauseTitleRect.anchorMin = new Vector2(0.5f, 0.88f);
             pauseTitleRect.anchorMax = new Vector2(0.5f, 0.88f);
@@ -560,15 +673,15 @@ namespace VRCombat.UI
                 new Color(0.2f, 0.58f, 0.27f, 0.95f));
             m_MenuResumeButton.onClick.AddListener(() => m_OnResumeRequested?.Invoke());
 
-            m_MenuRestartButton = CreateButton(
-                "MenuRestartButton",
+            m_MenuRespawnButton = CreateButton(
+                "RestartRunButton",
                 m_PausePanel.transform,
                 font,
                 "Restart",
                 new Vector2(0f, -152f),
                 new Vector2(300f, 84f),
                 new Color(0.85f, 0.15f, 0.15f, 0.95f));
-            m_MenuRestartButton.onClick.AddListener(() => restartAction?.Invoke());
+            m_MenuRespawnButton.onClick.AddListener(() => restartAction?.Invoke());
 
             m_MenuQuitButton = CreateButton(
                 "QuitButton",
@@ -580,12 +693,39 @@ namespace VRCombat.UI
                 new Color(0.18f, 0.22f, 0.26f, 0.96f));
             m_MenuQuitButton.onClick.AddListener(() => quitAction?.Invoke());
 
+            BuildDebugPanel(m_PausePanel.transform, font);
+            BuildVictoryPanel(canvasObject.transform, font, restartAction);
             BuildUpgradePanel(canvasObject.transform, font);
             ApplyAlwaysOnTopMaterials(canvasObject.transform, font);
 
             m_DeathPanel.SetActive(false);
             m_PausePanel.SetActive(false);
+            m_DebugPanel.SetActive(false);
+            m_VictoryPanel.SetActive(false);
             m_UpgradePanel.SetActive(false);
+        }
+
+        static void EnsureEventSystem()
+        {
+            var eventSystem = FindAnyObjectByType<EventSystem>(FindObjectsInactive.Include);
+            if (eventSystem == null)
+            {
+                var eventSystemObject = new GameObject("EventSystem");
+                eventSystem = eventSystemObject.AddComponent<EventSystem>();
+            }
+
+            eventSystem.gameObject.SetActive(true);
+            var xrInputModule = eventSystem.GetComponent<XRUIInputModule>();
+            if (xrInputModule == null)
+                xrInputModule = eventSystem.gameObject.AddComponent<XRUIInputModule>();
+
+            xrInputModule.enabled = true;
+
+            var inputSystemModule = eventSystem.GetComponent<InputSystemUIInputModule>();
+            if (inputSystemModule == null)
+                inputSystemModule = eventSystem.gameObject.AddComponent<InputSystemUIInputModule>();
+
+            inputSystemModule.enabled = true;
         }
 
         void RefreshCanvasCamera()
@@ -725,6 +865,212 @@ namespace VRCombat.UI
             buttonTextRect.offsetMax = Vector2.zero;
 
             return button;
+        }
+
+        void BuildDebugPanel(Transform parent, Font font)
+        {
+            m_DebugPanel = new GameObject("DebugPanel", typeof(RectTransform), typeof(Image));
+            m_DebugPanel.transform.SetParent(parent, false);
+            var panelRect = m_DebugPanel.GetComponent<RectTransform>();
+            panelRect.anchorMin = new Vector2(0.5f, 0.5f);
+            panelRect.anchorMax = new Vector2(0.5f, 0.5f);
+            panelRect.pivot = new Vector2(0.5f, 0.5f);
+            panelRect.anchoredPosition = new Vector2(370f, -20f);
+            panelRect.sizeDelta = new Vector2(650f, 660f);
+
+            var panelImage = m_DebugPanel.GetComponent<Image>();
+            panelImage.color = new Color(0.015f, 0.02f, 0.025f, 0.96f);
+
+            var title = CreateText("DebugTitle", m_DebugPanel.transform, font, 34, TextAnchor.MiddleCenter);
+            title.text = "Debug";
+            var titleRect = title.rectTransform;
+            titleRect.anchorMin = new Vector2(0.5f, 0.5f);
+            titleRect.anchorMax = new Vector2(0.5f, 0.5f);
+            titleRect.pivot = new Vector2(0.5f, 0.5f);
+            titleRect.anchoredPosition = new Vector2(0f, 290f);
+            titleRect.sizeDelta = new Vector2(560f, 48f);
+
+            m_DebugWaveValueText = CreateText("DebugWaveValue", m_DebugPanel.transform, font, 25, TextAnchor.MiddleCenter);
+            var waveRect = m_DebugWaveValueText.rectTransform;
+            waveRect.anchorMin = new Vector2(0.5f, 0.5f);
+            waveRect.anchorMax = new Vector2(0.5f, 0.5f);
+            waveRect.pivot = new Vector2(0.5f, 0.5f);
+            waveRect.anchoredPosition = new Vector2(0f, 248f);
+            waveRect.sizeDelta = new Vector2(560f, 42f);
+            UpdateDebugWaveText();
+
+            CreateDebugButton("DebugWaveDownButton", m_DebugPanel.transform, font, "- Wave", new Vector2(-190f, 204f), () => AdjustDebugWaveNumber(-1));
+            CreateDebugButton("DebugSetWaveButton", m_DebugPanel.transform, font, "Set Wave", new Vector2(0f, 204f), () => m_OnDebugSetWaveRequested?.Invoke(m_DebugWaveNumber));
+            CreateDebugButton("DebugWaveUpButton", m_DebugPanel.transform, font, "+ Wave", new Vector2(190f, 204f), () => AdjustDebugWaveNumber(1));
+            CreateDebugButton("DebugKillEnemiesButton", m_DebugPanel.transform, font, "Kill All Enemies", new Vector2(0f, 158f), () => m_OnDebugKillAllEnemiesRequested?.Invoke(), width: 250f);
+
+            var loadoutTitle = CreateText("DebugLoadoutTitle", m_DebugPanel.transform, font, 23, TextAnchor.MiddleCenter);
+            loadoutTitle.text = "Loadout";
+            var loadoutTitleRect = loadoutTitle.rectTransform;
+            loadoutTitleRect.anchorMin = new Vector2(0.5f, 0.5f);
+            loadoutTitleRect.anchorMax = new Vector2(0.5f, 0.5f);
+            loadoutTitleRect.pivot = new Vector2(0.5f, 0.5f);
+            loadoutTitleRect.anchoredPosition = new Vector2(0f, 112f);
+            loadoutTitleRect.sizeDelta = new Vector2(560f, 32f);
+
+            var loadoutButtons = new (string Label, Action Action)[]
+            {
+                ("All Weapons", () => m_OnDebugGrantAllWeaponsRequested?.Invoke()),
+                ("Chain", () => m_OnDebugGrantWeaponRequested?.Invoke(WeaponKind.Chain)),
+                ("Daggers", () => m_OnDebugGrantWeaponRequested?.Invoke(WeaponKind.Dagger)),
+                ("Flintlock", () => m_OnDebugGrantWeaponRequested?.Invoke(WeaponKind.Flintlock)),
+                ("Mace", () => m_OnDebugGrantWeaponRequested?.Invoke(WeaponKind.Mace)),
+                ("Shield", () => m_OnDebugGrantWeaponRequested?.Invoke(WeaponKind.Shield)),
+                ("Spear", () => m_OnDebugGrantWeaponRequested?.Invoke(WeaponKind.Spear)),
+                ("Sword", () => m_OnDebugGrantWeaponRequested?.Invoke(WeaponKind.Sword)),
+                ("Fireball", () => m_OnDebugUnlockSpellRequested?.Invoke(SpellKind.Fireball)),
+                ("Frost", () => m_OnDebugUnlockSpellRequested?.Invoke(SpellKind.Frost)),
+                ("Lightning", () => m_OnDebugUnlockSpellRequested?.Invoke(SpellKind.Lightning))
+            };
+
+            CreateDebugButtonGrid(loadoutButtons, m_DebugPanel.transform, font, startY: 73f, rowStep: 38f);
+
+            var upgradesTitle = CreateText("DebugUpgradesTitle", m_DebugPanel.transform, font, 23, TextAnchor.MiddleCenter);
+            upgradesTitle.text = "Upgrades";
+            var upgradesTitleRect = upgradesTitle.rectTransform;
+            upgradesTitleRect.anchorMin = new Vector2(0.5f, 0.5f);
+            upgradesTitleRect.anchorMax = new Vector2(0.5f, 0.5f);
+            upgradesTitleRect.pivot = new Vector2(0.5f, 0.5f);
+            upgradesTitleRect.anchoredPosition = new Vector2(0f, -62f);
+            upgradesTitleRect.sizeDelta = new Vector2(560f, 32f);
+
+            var upgrades = RunCatalog.Upgrades;
+            var upgradeButtons = new (string Label, Action Action)[upgrades.Count];
+            for (var i = 0; i < upgrades.Count; i++)
+            {
+                var definition = upgrades[i];
+                upgradeButtons[i] = (definition.DisplayName, () => m_OnDebugGrantUpgradeRequested?.Invoke(definition.Kind));
+            }
+
+            CreateDebugButtonGrid(upgradeButtons, m_DebugPanel.transform, font, startY: -102f, rowStep: 38f);
+        }
+
+        void CreateDebugButtonGrid(
+            IReadOnlyList<(string Label, Action Action)> buttons,
+            Transform parent,
+            Font font,
+            float startY,
+            float rowStep)
+        {
+            const int columns = 4;
+            var xPositions = new[] { -225f, -75f, 75f, 225f };
+            for (var i = 0; i < buttons.Count; i++)
+            {
+                var button = buttons[i];
+                var column = i % columns;
+                var row = i / columns;
+                CreateDebugButton(
+                    $"DebugButton{i}_{button.Label.Replace(" ", string.Empty)}",
+                    parent,
+                    font,
+                    button.Label,
+                    new Vector2(xPositions[column], startY - row * rowStep),
+                    button.Action,
+                    width: 138f);
+            }
+        }
+
+        Button CreateDebugButton(
+            string name,
+            Transform parent,
+            Font font,
+            string label,
+            Vector2 anchoredPosition,
+            Action action,
+            float width = 150f)
+        {
+            var buttonObject = new GameObject(name, typeof(RectTransform), typeof(Image), typeof(Button));
+            buttonObject.transform.SetParent(parent, false);
+
+            var buttonRect = buttonObject.GetComponent<RectTransform>();
+            buttonRect.anchorMin = new Vector2(0.5f, 0.5f);
+            buttonRect.anchorMax = new Vector2(0.5f, 0.5f);
+            buttonRect.pivot = new Vector2(0.5f, 0.5f);
+            buttonRect.anchoredPosition = anchoredPosition;
+            buttonRect.sizeDelta = new Vector2(width, 32f);
+
+            var image = buttonObject.GetComponent<Image>();
+            image.color = new Color(0.12f, 0.17f, 0.2f, 0.98f);
+
+            var button = buttonObject.GetComponent<Button>();
+            button.targetGraphic = image;
+            button.onClick.AddListener(() => action?.Invoke());
+
+            var buttonText = CreateText($"{name}Text", buttonObject.transform, font, 18, TextAnchor.MiddleCenter);
+            buttonText.text = label;
+            var textRect = buttonText.rectTransform;
+            textRect.anchorMin = Vector2.zero;
+            textRect.anchorMax = Vector2.one;
+            textRect.offsetMin = new Vector2(4f, 0f);
+            textRect.offsetMax = new Vector2(-4f, 0f);
+            return button;
+        }
+
+        void AdjustDebugWaveNumber(int delta)
+        {
+            m_DebugWaveNumber = Mathf.Clamp(m_DebugWaveNumber + delta, 1, 999);
+            UpdateDebugWaveText();
+        }
+
+        void UpdateDebugWaveText()
+        {
+            if (m_DebugWaveValueText != null)
+                m_DebugWaveValueText.text = $"Wave {m_DebugWaveNumber}";
+        }
+
+        void BuildVictoryPanel(Transform parent, Font font, Action restartAction)
+        {
+            m_VictoryPanel = new GameObject("VictoryPanel", typeof(RectTransform), typeof(Image));
+            m_VictoryPanel.transform.SetParent(parent, false);
+            var panelRect = m_VictoryPanel.GetComponent<RectTransform>();
+            panelRect.anchorMin = Vector2.zero;
+            panelRect.anchorMax = Vector2.one;
+            panelRect.offsetMin = Vector2.zero;
+            panelRect.offsetMax = Vector2.zero;
+
+            var panelImage = m_VictoryPanel.GetComponent<Image>();
+            panelImage.color = new Color(0f, 0f, 0f, 0.9f);
+
+            var titleText = CreateText("VictoryTitle", m_VictoryPanel.transform, font, 64, TextAnchor.MiddleCenter);
+            titleText.text = "You won";
+            var titleRect = titleText.rectTransform;
+            titleRect.anchorMin = new Vector2(0.5f, 0.72f);
+            titleRect.anchorMax = new Vector2(0.5f, 0.72f);
+            titleRect.pivot = new Vector2(0.5f, 0.5f);
+            titleRect.sizeDelta = new Vector2(720f, 100f);
+
+            var subtitleText = CreateText("VictorySubtitle", m_VictoryPanel.transform, font, 34, TextAnchor.MiddleCenter);
+            subtitleText.text = "The boss is defeated.";
+            var subtitleRect = subtitleText.rectTransform;
+            subtitleRect.anchorMin = new Vector2(0.5f, 0.59f);
+            subtitleRect.anchorMax = new Vector2(0.5f, 0.59f);
+            subtitleRect.pivot = new Vector2(0.5f, 0.5f);
+            subtitleRect.sizeDelta = new Vector2(760f, 70f);
+
+            m_VictoryRestartButton = CreateButton(
+                "VictoryRestartButton",
+                m_VictoryPanel.transform,
+                font,
+                "Restart",
+                new Vector2(-190f, -85f),
+                new Vector2(330f, 88f),
+                new Color(0.85f, 0.15f, 0.15f, 0.95f));
+            m_VictoryRestartButton.onClick.AddListener(() => restartAction?.Invoke());
+
+            m_VictoryContinueButton = CreateButton(
+                "VictoryContinueEndlessButton",
+                m_VictoryPanel.transform,
+                font,
+                "Continue Endless",
+                new Vector2(190f, -85f),
+                new Vector2(390f, 88f),
+                new Color(0.2f, 0.58f, 0.27f, 0.95f));
+            m_VictoryContinueButton.onClick.AddListener(() => m_OnContinueEndlessRequested?.Invoke());
         }
 
         void BuildUpgradePanel(Transform parent, Font font)

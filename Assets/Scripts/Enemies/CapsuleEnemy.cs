@@ -103,7 +103,7 @@ namespace VRCombat.Enemies
         Color m_BleedColor = new Color(0.5f, 0.03f, 0.05f, 0.72f);
 
         [SerializeField]
-        int m_MaxBloodDecals = 90;
+        int m_MaxBloodDecals = 220;
 
         [SerializeField]
         int m_MinDecalsPerHit = 1;
@@ -169,7 +169,7 @@ namespace VRCombat.Enemies
         static readonly Queue<GameObject> s_BloodDecalQueue = new Queue<GameObject>();
         static readonly int BaseColorId = Shader.PropertyToID("_BaseColor");
         static readonly int ColorId = Shader.PropertyToID("_Color");
-        static int s_GlobalMaxBloodDecals = 140;
+        static int s_GlobalMaxBloodDecals = 360;
 
         public static void ClearRuntimeDecals()
         {
@@ -246,10 +246,36 @@ namespace VRCombat.Enemies
                     m_ContactDamage *= 2f;
                     m_MoveSpeed *= 1.6f;
                     break;
+                case EnemyRarity.Boss:
+                    ConfigureBossStats();
+                    break;
             }
             m_BaseMoveSpeed = m_MoveSpeed;
             m_CurrentHealth = m_MaxHealth;
             UpdateColor();
+        }
+
+        void ConfigureBossStats()
+        {
+            m_MaxHealth = 850f;
+            m_ContactDamage = 34f;
+            m_MoveSpeed = 1f;
+            m_PlayerContactCooldown = 0.65f;
+            m_PlayerKnockbackAtFullHealth = 1.45f;
+            m_PlayerKnockbackAtZeroHealth = 4.5f;
+            m_DamageKnockbackImpulse = 0.08f;
+            m_MaxDamageKnockbackImpulse = 0.42f;
+            m_KnockbackDamping = 5.8f;
+            m_KnockbackBounceRetainedSpeed = 0.58f;
+            m_ObstacleCheckDistance = 1.45f;
+            m_ObstacleProbeRadius = 0.58f;
+            m_ObstacleAvoidanceStrength = 1.7f;
+            m_SeparationRadius = 1.35f;
+            m_SeparationStrength = 1.15f;
+            m_MaxGrabDistance = Mathf.Max(m_MaxGrabDistance, 1.6f);
+            m_DeathToppleImpulse = 2.7f;
+            m_DeathToppleTorque = 22f;
+            m_DeathDespawnDelay = 2.25f;
         }
 
         void Awake()
@@ -354,20 +380,21 @@ namespace VRCombat.Enemies
                 m_JumpEndTime = Time.time + 1.0f;
                 m_NextAbilityTime = Time.time + Random.Range(3f, 5f);
             }
-            else if (m_Rarity == EnemyRarity.Epic && Time.time > m_NextAbilityTime)
+            else if ((m_Rarity == EnemyRarity.Epic || m_Rarity == EnemyRarity.Boss) && Time.time > m_NextAbilityTime)
             {
                 if (!m_IsCharging)
                 {
                     m_IsCharging = true;
                     m_ChargeDirection = (m_Target.position - transform.position).normalized;
                     m_ChargeDirection.y = 0;
-                    m_NextAbilityTime = Time.time + 1.5f; // charge duration
+                    m_NextAbilityTime = Time.time + (m_Rarity == EnemyRarity.Boss ? 1.85f : 1.5f); // charge duration
                 }
             }
 
             if (m_IsCharging)
             {
-                m_Rigidbody.MovePosition(m_Rigidbody.position + m_ChargeDirection * (GetEffectiveMoveSpeed() * 3f * Time.fixedDeltaTime));
+                var chargeSpeedMultiplier = m_Rarity == EnemyRarity.Boss ? 2.55f : 3f;
+                m_Rigidbody.MovePosition(m_Rigidbody.position + m_ChargeDirection * (GetEffectiveMoveSpeed() * chargeSpeedMultiplier * Time.fixedDeltaTime));
                 if (m_ChargeDirection.sqrMagnitude > 0.001f)
                 {
                     var targetRot = Quaternion.LookRotation(m_ChargeDirection, Vector3.up);
@@ -377,7 +404,7 @@ namespace VRCombat.Enemies
                 if (Time.time > m_NextAbilityTime)
                 {
                     m_IsCharging = false;
-                    m_NextAbilityTime = Time.time + Random.Range(4f, 7f);
+                    m_NextAbilityTime = Time.time + (m_Rarity == EnemyRarity.Boss ? Random.Range(3.4f, 5.4f) : Random.Range(4f, 7f));
                 }
                 return;
             }
@@ -781,6 +808,7 @@ namespace VRCombat.Enemies
                 case EnemyRarity.Uncommon: rarityHealthy = Color.blue; break;
                 case EnemyRarity.Rare: rarityHealthy = Color.red; break;
                 case EnemyRarity.Epic: rarityHealthy = new Color(1f, 0.84f, 0f); break; // Gold
+                case EnemyRarity.Boss: rarityHealthy = Color.white; break;
             }
             var baseColor = Color.Lerp(m_DamagedColor, rarityHealthy, normalizedHealth);
 
@@ -876,7 +904,7 @@ namespace VRCombat.Enemies
 
         void EmitBleedDecals(Vector3 hitPoint, float damageAmount)
         {
-            s_GlobalMaxBloodDecals = Mathf.Clamp(m_MaxBloodDecals, 10, 600);
+            s_GlobalMaxBloodDecals = Mathf.Clamp(m_MaxBloodDecals, 10, 1200);
 
             var count = Mathf.Clamp(
                 Mathf.RoundToInt(damageAmount * 0.12f),

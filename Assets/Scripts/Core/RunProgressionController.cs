@@ -69,6 +69,22 @@ namespace VRCombat.Core
                 RaiseProgressionChanged();
         }
 
+        public bool GrantUpgradeForDebug(UpgradeKind upgradeKind, int stackCount = 1)
+        {
+            if (!RunCatalog.TryGetUpgrade(upgradeKind, out _))
+                return false;
+
+            var stacksToAdd = Mathf.Max(1, stackCount);
+            if (m_UpgradeStacks.TryGetValue(upgradeKind, out var currentStacks))
+                m_UpgradeStacks[upgradeKind] = currentStacks + stacksToAdd;
+            else
+                m_UpgradeStacks[upgradeKind] = stacksToAdd;
+
+            RefreshHud();
+            RaiseProgressionChanged();
+            return true;
+        }
+
         public bool HasWeapon(WeaponKind weaponKind)
         {
             return weaponKind != WeaponKind.None && m_OwnedWeapons.Contains(weaponKind);
