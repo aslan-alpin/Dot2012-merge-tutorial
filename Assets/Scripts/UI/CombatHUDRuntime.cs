@@ -46,6 +46,7 @@ namespace VRCombat.UI
         Button m_MenuResumeButton;
         Button m_MenuRespawnButton;
         Button m_MenuQuitButton;
+        Button m_DebugHotspotButton;
         Button m_VictoryRestartButton;
         Button m_VictoryContinueButton;
         readonly Button[] m_UpgradeButtons = new Button[3];
@@ -68,10 +69,16 @@ namespace VRCombat.UI
         Action<SpellKind> m_OnDebugUnlockSpellRequested;
         Action m_OnDebugGrantAllWeaponsRequested;
         Action m_OnDebugKillAllEnemiesRequested;
+        Action m_OnDebugSpawnMahmutCanKovanCardRequested;
         Action<int> m_OnDebugSetWaveRequested;
         Action<int> m_OnUpgradeSelected;
         int m_DebugWaveNumber = 15;
+        int m_DebugHotspotClickCount;
+        float m_LastDebugHotspotClickTime = -100f;
         float m_UpgradeButtonsUnlockAtRealtime;
+
+        const int DebugHotspotClickThreshold = 3;
+        const float DebugHotspotClickWindowSeconds = 1.6f;
 
         [SerializeField]
         float m_HudDistance = 1.05f;
@@ -101,7 +108,8 @@ namespace VRCombat.UI
             Action<SpellKind> debugUnlockSpellAction = null,
             Action debugGrantAllWeaponsAction = null,
             Action debugKillAllEnemiesAction = null,
-            Action<int> debugSetWaveAction = null)
+            Action<int> debugSetWaveAction = null,
+            Action debugSpawnMahmutCanKovanCardAction = null)
         {
             m_OnMovementVignetteChanged = movementVignetteChangedAction;
             m_OnResumeRequested = resumeAction;
@@ -112,6 +120,7 @@ namespace VRCombat.UI
             m_OnDebugGrantAllWeaponsRequested = debugGrantAllWeaponsAction;
             m_OnDebugKillAllEnemiesRequested = debugKillAllEnemiesAction;
             m_OnDebugSetWaveRequested = debugSetWaveAction;
+            m_OnDebugSpawnMahmutCanKovanCardRequested = debugSpawnMahmutCanKovanCardAction;
             m_ViewCamera = viewCamera;
             m_ViewTransform = viewTransform;
             BuildUi(restartAction, quitAction);
@@ -236,6 +245,7 @@ namespace VRCombat.UI
             if (!visible)
             {
                 SetDebugPanelVisible(false);
+                m_DebugHotspotClickCount = 0;
                 return;
             }
 
@@ -585,6 +595,13 @@ namespace VRCombat.UI
             pauseTitleRect.pivot = new Vector2(0.5f, 0.5f);
             pauseTitleRect.sizeDelta = new Vector2(500f, 80f);
 
+            m_DebugHotspotButton = CreateInvisibleButton(
+                "DebugTitleHotspot",
+                m_PausePanel.transform,
+                new Vector2(0f, 288f),
+                new Vector2(520f, 96f));
+            m_DebugHotspotButton.onClick.AddListener(RegisterDebugHotspotClick);
+
             var vignetteLabel = CreateText("MovementVignetteLabel", m_PausePanel.transform, font, 34, TextAnchor.MiddleLeft);
             vignetteLabel.text = "Movement Vignette";
             var vignetteLabelRect = vignetteLabel.rectTransform;
@@ -694,6 +711,8 @@ namespace VRCombat.UI
             m_MenuQuitButton.onClick.AddListener(() => quitAction?.Invoke());
 
             BuildDebugPanel(m_PausePanel.transform, font);
+            if (m_DebugHotspotButton != null)
+                m_DebugHotspotButton.transform.SetAsLastSibling();
             BuildVictoryPanel(canvasObject.transform, font, restartAction);
             BuildUpgradePanel(canvasObject.transform, font);
             ApplyAlwaysOnTopMaterials(canvasObject.transform, font);
@@ -867,6 +886,47 @@ namespace VRCombat.UI
             return button;
         }
 
+        static Button CreateInvisibleButton(
+            string name,
+            Transform parent,
+            Vector2 anchoredPosition,
+            Vector2 size)
+        {
+            var buttonObject = new GameObject(name, typeof(RectTransform), typeof(Image), typeof(Button));
+            buttonObject.transform.SetParent(parent, false);
+
+            var rect = buttonObject.GetComponent<RectTransform>();
+            rect.anchorMin = new Vector2(0.5f, 0.5f);
+            rect.anchorMax = new Vector2(0.5f, 0.5f);
+            rect.pivot = new Vector2(0.5f, 0.5f);
+            rect.anchoredPosition = anchoredPosition;
+            rect.sizeDelta = size;
+
+            var image = buttonObject.GetComponent<Image>();
+            image.color = new Color(0f, 0f, 0f, 0.001f);
+            image.raycastTarget = true;
+
+            var button = buttonObject.GetComponent<Button>();
+            button.targetGraphic = image;
+            return button;
+        }
+
+        void RegisterDebugHotspotClick()
+        {
+            var now = Time.realtimeSinceStartup;
+            if (now - m_LastDebugHotspotClickTime > DebugHotspotClickWindowSeconds)
+                m_DebugHotspotClickCount = 0;
+
+            m_LastDebugHotspotClickTime = now;
+            m_DebugHotspotClickCount++;
+            if (m_DebugHotspotClickCount < DebugHotspotClickThreshold)
+                return;
+
+            m_DebugHotspotClickCount = 0;
+            ToggleDebugPanel();
+            ShowBanner("Debug menu", 0.8f);
+        }
+
         void BuildDebugPanel(Transform parent, Font font)
         {
             m_DebugPanel = new GameObject("DebugPanel", typeof(RectTransform), typeof(Image));
@@ -875,7 +935,7 @@ namespace VRCombat.UI
             panelRect.anchorMin = new Vector2(0.5f, 0.5f);
             panelRect.anchorMax = new Vector2(0.5f, 0.5f);
             panelRect.pivot = new Vector2(0.5f, 0.5f);
-            panelRect.anchoredPosition = new Vector2(370f, -20f);
+            panelRect.anchoredPosition = new Vector2(120f, -20f);
             panelRect.sizeDelta = new Vector2(650f, 660f);
 
             var panelImage = m_DebugPanel.GetComponent<Image>();
@@ -948,6 +1008,14 @@ namespace VRCombat.UI
             }
 
             CreateDebugButtonGrid(upgradeButtons, m_DebugPanel.transform, font, startY: -102f, rowStep: 38f);
+            CreateDebugButton(
+                "DebugMahmutCanKovanButton",
+                m_DebugPanel.transform,
+                font,
+                "MahmutCanKovan",
+                new Vector2(0f, -282f),
+                () => m_OnDebugSpawnMahmutCanKovanCardRequested?.Invoke(),
+                width: 300f);
         }
 
         void CreateDebugButtonGrid(

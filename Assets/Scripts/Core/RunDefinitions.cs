@@ -26,7 +26,8 @@ namespace VRCombat.Core
     public enum CardRewardType
     {
         Weapon,
-        Spell
+        Spell,
+        Special
     }
 
     public enum UpgradeKind
@@ -230,6 +231,13 @@ namespace VRCombat.Core
 
     public static class RunCatalog
     {
+        public static CardDefinition MahmutCanKovanCard { get; } = new CardDefinition(
+            "mahmutcankovan",
+            "MahmutCanKovan",
+            CardRewardType.Special,
+            "Sword",
+            "CombatModels/easteregg");
+
         static readonly CardDefinition[] s_Cards =
         {
             new CardDefinition("daggers", "Daggers", CardRewardType.Weapon, "Daggers", "CombatModels/daggerscard", weaponKind: WeaponKind.Dagger),

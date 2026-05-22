@@ -108,7 +108,8 @@ namespace VRCombat.Player
             if (selectedSpell == SpellKind.None || !RunCatalog.TryGetSpell(selectedSpell, out var spellDefinition))
                 return;
 
-            if (m_NextCastTimeByHand.TryGetValue(handSide, out var nextCastTime) && Time.time < nextCastTime)
+            var cooldownsDisabled = m_ProgressionController != null && m_ProgressionController.SpellCooldownsDisabled;
+            if (!cooldownsDisabled && m_NextCastTimeByHand.TryGetValue(handSide, out var nextCastTime) && Time.time < nextCastTime)
                 return;
 
             ResolveCastPose(xrNode, handTransform, controllerTransform, out var castOrigin, out var castDirection);
@@ -128,7 +129,7 @@ namespace VRCombat.Player
                     break;
             }
 
-            m_NextCastTimeByHand[handSide] = Time.time + spellDefinition.CooldownSeconds;
+            m_NextCastTimeByHand[handSide] = cooldownsDisabled ? Time.time : Time.time + spellDefinition.CooldownSeconds;
         }
 
         void ResolveCastPose(XRNode xrNode, Transform handTransform, Transform controllerTransform, out Vector3 castOrigin, out Vector3 castDirection)

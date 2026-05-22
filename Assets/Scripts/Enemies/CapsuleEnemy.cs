@@ -13,7 +13,7 @@ namespace VRCombat.Enemies
     [DisallowMultipleComponent]
     [RequireComponent(typeof(Rigidbody))]
     [RequireComponent(typeof(CapsuleCollider))]
-    public class CapsuleEnemy : MonoBehaviour, IDamageable
+    public class CapsuleEnemy : MonoBehaviour, IDamageable, IStatusEffectTarget
     {
         [Header("Scaling")]
         [SerializeField] EnemyRarity m_Rarity = EnemyRarity.Common;
@@ -831,7 +831,13 @@ namespace VRCombat.Enemies
             if (Time.time > m_SlowUntilTime)
                 m_SlowMultiplier = 1f;
 
-            if (Time.time > m_BurnUntilTime || m_BurnDamagePerSecond <= 0f)
+            if (Time.time > m_BurnUntilTime)
+            {
+                m_BurnDamagePerSecond = 0f;
+                return;
+            }
+
+            if (m_BurnDamagePerSecond <= 0f)
                 return;
 
             if (Time.time < m_NextBurnTickTime)

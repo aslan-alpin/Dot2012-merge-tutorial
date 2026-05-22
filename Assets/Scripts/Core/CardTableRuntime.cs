@@ -31,6 +31,7 @@ namespace VRCombat.Core
         static readonly int CullShaderId = Shader.PropertyToID("_Cull");
 
         static readonly Dictionary<string, Material> s_CardMaterialCache = new Dictionary<string, Material>();
+        static Material s_LooseCardFallbackMaterial;
 
         Transform m_TableVisualRoot;
         Transform m_CardSocket;
@@ -192,6 +193,132 @@ namespace VRCombat.Core
 
             m_CurrentCardObjects.Add(cardRoot);
             return true;
+        }
+
+        public static GameObject CreateLooseCard(
+            CardDefinition cardDefinition,
+            Vector3 worldPosition,
+            Quaternion worldRotation,
+            RunProgressionController progressionController,
+            VRCombatBootstrapper bootstrapper,
+            float maxGrabDistance)
+        {
+            if (cardDefinition == null)
+                return null;
+
+            var cardRoot = new GameObject($"{cardDefinition.DisplayName} Card");
+            cardRoot.transform.SetPositionAndRotation(worldPosition, worldRotation);
+            cardRoot.transform.localScale = Vector3.one;
+
+            var hasVisibleImportedVisual = false;
+            if (TryInstantiateLooseCardVisual(cardDefinition, cardRoot.transform, out var cardVisualRoot))
+            {
+                cardVisualRoot.transform.localScale = Vector3.one * ImportedCardScale;
+                OrientCardVisualFlat(cardVisualRoot.transform);
+                hasVisibleImportedVisual = HasVisibleRenderers(cardVisualRoot) &&
+                                          TryGetVisualBounds(cardVisualRoot.transform, cardRoot.transform, out _);
+                if (hasVisibleImportedVisual)
+                {
+                    CenterVisualOnFloor(cardVisualRoot.transform, cardRoot.transform);
+                    cardVisualRoot.transform.localPosition += Vector3.up * CardSurfaceOffsetMeters;
+                }
+                else
+                {
+                    Destroy(cardVisualRoot);
+                }
+            }
+
+            if (!hasVisibleImportedVisual)
+            {
+                var fallbackVisual = GameObject.CreatePrimitive(PrimitiveType.Cube);
+                fallbackVisual.name = "Card Visual";
+                fallbackVisual.transform.SetParent(cardRoot.transform, false);
+                fallbackVisual.transform.localPosition = new Vector3(0f, 0.006f, 0f);
+                fallbackVisual.transform.localScale = new Vector3(0.32f, 0.012f, 0.48f);
+                ApplyMaterialStatic(fallbackVisual.GetComponent<Renderer>(), GetOrCreateLooseCardFallbackMaterial());
+            }
+
+            if (!TryGetVisualBounds(cardRoot.transform, cardRoot.transform, out var localBounds))
+                localBounds = new Bounds(new Vector3(0f, 0.006f, 0f), new Vector3(0.32f, 0.012f, 0.48f));
+
+            var collider = cardRoot.AddComponent<BoxCollider>();
+            collider.center = localBounds.center;
+            collider.size = localBounds.size + new Vector3(0.02f, 0.01f, 0.02f);
+
+            var rigidbody = cardRoot.AddComponent<Rigidbody>();
+            rigidbody.mass = 0.08f;
+            rigidbody.useGravity = false;
+            rigidbody.isKinematic = true;
+            rigidbody.collisionDetectionMode = CollisionDetectionMode.ContinuousSpeculative;
+
+            var interactable = cardRoot.AddComponent<XRGrabInteractable>();
+            interactable.trackPosition = true;
+            interactable.trackRotation = true;
+            interactable.throwOnDetach = false;
+            interactable.movementType = XRBaseInteractable.MovementType.VelocityTracking;
+            interactable.useDynamicAttach = true;
+            interactable.matchAttachPosition = true;
+            interactable.matchAttachRotation = true;
+            interactable.reinitializeDynamicAttachEverySingleGrab = true;
+            interactable.attachEaseInTime = 0.04f;
+            interactable.smoothPosition = true;
+            interactable.tightenPosition = 0.85f;
+            interactable.smoothRotation = true;
+            interactable.tightenRotation = 0.85f;
+            interactable.colliders.Clear();
+            interactable.colliders.Add(collider);
+
+            var distanceFilter = cardRoot.AddComponent<MaxGrabDistanceSelectFilter>();
+            distanceFilter.Configure(maxGrabDistance);
+            interactable.selectFilters.Add(distanceFilter);
+
+            var pickup = cardRoot.AddComponent<CardPickup>();
+            pickup.Initialize(cardDefinition, progressionController, bootstrapper, rigidbody, tableRuntime: null);
+            return cardRoot;
+        }
+
+        static bool TryInstantiateLooseCardVisual(CardDefinition cardDefinition, Transform parent, out GameObject visualRoot)
+        {
+            visualRoot = null;
+            var modelPrefab = Resources.Load<GameObject>(CardModelResourcePath);
+            if (cardDefinition == null || parent == null)
+                return false;
+
+            var fallbackMaterial = GetOrCreateLooseCardFallbackMaterial();
+            if (modelPrefab != null)
+            {
+                visualRoot = Instantiate(modelPrefab, parent, false);
+                visualRoot.name = "Card Visual";
+                StripImportedSceneComponents(visualRoot);
+                RuntimeCombatModelMaterialBinder.Apply(visualRoot, fallbackMaterial);
+                SetCardMeshVisibility(visualRoot, cardDefinition.CardMeshNames);
+                ApplyCardArtMaterialStatic(visualRoot, cardDefinition);
+                ApplyFallbackMaterialToRenderersStatic(visualRoot, fallbackMaterial);
+                if (HasVisibleRenderers(visualRoot))
+                    return true;
+
+                Destroy(visualRoot);
+                visualRoot = null;
+            }
+
+            if (string.IsNullOrWhiteSpace(cardDefinition.CardArtResourcePath))
+                return false;
+
+            var standalonePrefab = Resources.Load<GameObject>(cardDefinition.CardArtResourcePath);
+            if (standalonePrefab == null)
+                return false;
+
+            visualRoot = Instantiate(standalonePrefab, parent, false);
+            visualRoot.name = "Card Visual";
+            StripImportedSceneComponents(visualRoot);
+            RuntimeCombatModelMaterialBinder.Apply(visualRoot, fallbackMaterial);
+            ApplyFallbackMaterialToRenderersStatic(visualRoot, fallbackMaterial);
+            if (HasVisibleRenderers(visualRoot))
+                return true;
+
+            Destroy(visualRoot);
+            visualRoot = null;
+            return false;
         }
 
         void EnsureRuntimeVisuals()
@@ -583,6 +710,53 @@ namespace VRCombat.Core
             }
         }
 
+        static void ApplyCardArtMaterialStatic(GameObject visualRoot, CardDefinition cardDefinition)
+        {
+            if (visualRoot == null || cardDefinition == null || string.IsNullOrWhiteSpace(cardDefinition.CardArtResourcePath))
+                return;
+
+            var texture = Resources.Load<Texture2D>(cardDefinition.CardArtResourcePath);
+            if (texture == null)
+                return;
+
+            if (!s_CardMaterialCache.TryGetValue(cardDefinition.CardArtResourcePath, out var material) || material == null)
+            {
+                var shader = Shader.Find("Universal Render Pipeline/Lit") ?? Shader.Find("Universal Render Pipeline/Simple Lit") ?? Shader.Find("Standard");
+                if (shader == null)
+                    return;
+
+                material = new Material(shader)
+                {
+                    name = $"{cardDefinition.DisplayName} Card Runtime"
+                };
+                if (material.HasProperty(BaseColorShaderId))
+                    material.SetColor(BaseColorShaderId, Color.white);
+                if (material.HasProperty(ColorShaderId))
+                    material.SetColor(ColorShaderId, Color.white);
+                if (material.HasProperty(BaseMapShaderId))
+                    material.SetTexture(BaseMapShaderId, texture);
+                if (material.HasProperty(MainTexShaderId))
+                    material.SetTexture(MainTexShaderId, texture);
+                if (material.HasProperty(CullShaderId))
+                    material.SetFloat(CullShaderId, 0f);
+                material.doubleSidedGI = true;
+                s_CardMaterialCache[cardDefinition.CardArtResourcePath] = material;
+            }
+
+            var renderers = visualRoot.GetComponentsInChildren<Renderer>(true);
+            for (var i = 0; i < renderers.Length; i++)
+            {
+                var renderer = renderers[i];
+                if (renderer == null || !renderer.enabled)
+                    continue;
+
+                var materials = renderer.sharedMaterials;
+                for (var j = 0; j < materials.Length; j++)
+                    materials[j] = material;
+                renderer.sharedMaterials = materials;
+            }
+        }
+
         static bool TryGetVisualBounds(Transform visualRoot, Transform referenceTransform, out Bounds bounds)
         {
             bounds = default;
@@ -719,6 +893,51 @@ namespace VRCombat.Core
             renderer.sharedMaterials = materials;
         }
 
+        static void ApplyFallbackMaterialToRenderersStatic(GameObject root, Material fallbackMaterial)
+        {
+            if (root == null || fallbackMaterial == null)
+                return;
+
+            var renderers = root.GetComponentsInChildren<Renderer>(true);
+            for (var i = 0; i < renderers.Length; i++)
+            {
+                var renderer = renderers[i];
+                if (renderer == null)
+                    continue;
+
+                var materials = renderer.sharedMaterials;
+                var changed = false;
+                for (var j = 0; j < materials.Length; j++)
+                {
+                    if (materials[j] != null)
+                        continue;
+
+                    materials[j] = fallbackMaterial;
+                    changed = true;
+                }
+
+                if (changed)
+                    renderer.sharedMaterials = materials;
+            }
+        }
+
+        static void ApplyMaterialStatic(Renderer renderer, Material material)
+        {
+            if (renderer == null || material == null)
+                return;
+
+            var materials = renderer.sharedMaterials;
+            if (materials == null || materials.Length == 0)
+            {
+                renderer.sharedMaterial = material;
+                return;
+            }
+
+            for (var i = 0; i < materials.Length; i++)
+                materials[i] = material;
+            renderer.sharedMaterials = materials;
+        }
+
         Material GetOrCreateTableFallbackMaterial()
         {
             if (m_TableFallbackMaterial != null)
@@ -760,6 +979,29 @@ namespace VRCombat.Core
                 m_CardFallbackMaterial.SetFloat(CullShaderId, 0f);
             m_CardFallbackMaterial.doubleSidedGI = true;
             return m_CardFallbackMaterial;
+        }
+
+        static Material GetOrCreateLooseCardFallbackMaterial()
+        {
+            if (s_LooseCardFallbackMaterial != null)
+                return s_LooseCardFallbackMaterial;
+
+            var shader = Shader.Find("Universal Render Pipeline/Lit") ?? Shader.Find("Universal Render Pipeline/Simple Lit") ?? Shader.Find("Standard");
+            if (shader == null)
+                return null;
+
+            s_LooseCardFallbackMaterial = new Material(shader)
+            {
+                name = "Runtime Loose Card Fallback"
+            };
+            if (s_LooseCardFallbackMaterial.HasProperty(BaseColorShaderId))
+                s_LooseCardFallbackMaterial.SetColor(BaseColorShaderId, new Color(0.93f, 0.9f, 0.78f, 1f));
+            if (s_LooseCardFallbackMaterial.HasProperty(ColorShaderId))
+                s_LooseCardFallbackMaterial.SetColor(ColorShaderId, new Color(0.93f, 0.9f, 0.78f, 1f));
+            if (s_LooseCardFallbackMaterial.HasProperty(CullShaderId))
+                s_LooseCardFallbackMaterial.SetFloat(CullShaderId, 0f);
+            s_LooseCardFallbackMaterial.doubleSidedGI = true;
+            return s_LooseCardFallbackMaterial;
         }
 
         public void HandleCardChosen(GameObject selectedCardObject)
@@ -894,6 +1136,9 @@ namespace VRCombat.Core
                 case CardRewardType.Spell:
                     if (m_ProgressionController != null && m_ProgressionController.UnlockSpell(m_CardDefinition.SpellKind))
                         m_Bootstrapper.ShowRuntimeBanner($"{m_CardDefinition.DisplayName} unlocked", 1.25f);
+                    break;
+                case CardRewardType.Special:
+                    m_Bootstrapper.ActivateSpecialCard(m_CardDefinition);
                     break;
             }
 

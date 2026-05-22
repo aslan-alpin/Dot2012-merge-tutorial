@@ -211,6 +211,10 @@ namespace VRCombat.Core
         readonly List<Renderer> m_RightSuppressedHandRenderers = new List<Renderer>();
         readonly List<Collider> m_LeftSuppressedHandColliders = new List<Collider>();
         readonly List<Collider> m_RightSuppressedHandColliders = new List<Collider>();
+        GameObject m_MahmutCanKovanLeftEyeBlackoutObject;
+        Mesh m_MahmutCanKovanLeftEyeBlackoutMesh;
+        MeshRenderer m_MahmutCanKovanLeftEyeBlackoutRenderer;
+        Material m_MahmutCanKovanLeftEyeBlackoutMaterial;
         int m_LeftSuppressedRendererHoldCount;
         int m_RightSuppressedRendererHoldCount;
         int m_LeftSuppressedColliderHoldCount;
@@ -221,6 +225,8 @@ namespace VRCombat.Core
         static readonly RaycastHit[] s_PlayerGroundHitBuffer = new RaycastHit[16];
         static readonly RaycastHit[] s_ArenaSurfaceHitBuffer = new RaycastHit[96];
         static readonly Collider[] s_SpawnClearanceBuffer = new Collider[96];
+        const string MahmutCanKovanLeftEyeBlackoutShaderResourcePath = "Shaders/MahmutCanKovanLeftEyeBlackout";
+        const string MahmutCanKovanLeftEyeBlackoutShaderName = "VRCombat/MahmutCanKovanLeftEyeBlackout";
         Coroutine m_DeathFlowRoutine;
         Vector3 m_KillZoneCenter;
         bool m_HasKillZoneCenter;
@@ -257,6 +263,7 @@ namespace VRCombat.Core
         float m_LastDebugMenuComboInputTime = -100f;
         bool m_WasXrDebugComboAxisPressed;
         DebugComboDirection m_LastXrDebugComboAxisDirection;
+        bool m_WasDebugThumbstickClickComboPressed;
         bool m_WasRawMenuButtonPressed;
         bool m_PendingMetaMenuGesture;
         float m_BootstrapStartedRealtime;
@@ -497,10 +504,10 @@ namespace VRCombat.Core
                 yield return null;
 
             EnablePlayerControls();
-            ConfigureControllerLocomotionActionManagers();
             SetupPlayerDamageDetection();
             SetupMovementVignetteControl();
             ConfigureHandFirstInteraction();
+            ConfigureControllerLocomotionActionManagers();
             SetupCombatHud();
             EnsureRunSystems();
             SetupPauseMenuInputActions();
@@ -548,6 +555,7 @@ namespace VRCombat.Core
                 m_MilestoneKeyCarrier.Died -= HandleMilestoneKeyCarrierDied;
 
             RestoreSuppressedHandRenderers();
+            RestoreMahmutCanKovanCameraRendering();
             UnbindMetaMenuGestureDetector();
             if (m_RuntimePauseMenuAction != null)
             {
@@ -578,14 +586,55 @@ namespace VRCombat.Core
         void ConfigureControllerLocomotionActionManagers()
         {
             if (m_PlayerRoot == null)
+            {
+                DisableGameplayTeleportation();
                 return;
+            }
 
             var actionManagers = m_PlayerRoot.GetComponentsInChildren<ControllerInputActionManager>(true);
             for (var i = 0; i < actionManagers.Length; i++)
             {
-                if (actionManagers[i] != null)
-                    actionManagers[i].allowTeleportWithSmoothMotion = true;
+                var actionManager = actionManagers[i];
+                if (actionManager == null)
+                    continue;
+
+                actionManager.teleportEnabled = false;
+                actionManager.allowTeleportWithSmoothMotion = false;
+                var side = ResolveControllerInputActionManagerSide(actionManager);
+                if (side == HandSide.Right)
+                {
+                    actionManager.smoothMotionEnabled = false;
+                }
+                else
+                {
+                    actionManager.smoothMotionEnabled = true;
+                }
             }
+
+            DisableGameplayTeleportation();
+        }
+
+        HandSide ResolveControllerInputActionManagerSide(ControllerInputActionManager actionManager)
+        {
+            if (actionManager == null)
+                return HandSide.None;
+
+            RefreshHandTransformsIfNeeded();
+            var actionManagerTransform = actionManager.transform;
+            if (MatchesSideHierarchy(actionManagerTransform, HandSide.Left))
+                return HandSide.Left;
+
+            if (MatchesSideHierarchy(actionManagerTransform, HandSide.Right))
+                return HandSide.Right;
+
+            var path = GetTransformPath(actionManagerTransform);
+            if (path.IndexOf("left", StringComparison.OrdinalIgnoreCase) >= 0)
+                return HandSide.Left;
+
+            if (path.IndexOf("right", StringComparison.OrdinalIgnoreCase) >= 0)
+                return HandSide.Right;
+
+            return HandSide.None;
         }
 
         bool TryResolvePlayerRig(bool forceRefresh = false)
@@ -1792,7 +1841,16 @@ namespace VRCombat.Core
             if (!m_IsPauseMenuOpen || m_CombatHud == null)
             {
                 m_DebugMenuComboIndex = 0;
+                m_WasDebugThumbstickClickComboPressed = false;
                 return false;
+            }
+
+            if (WasDebugMenuDirectTogglePressedThisFrame())
+            {
+                m_DebugMenuComboIndex = 0;
+                m_CombatHud.ToggleDebugPanel();
+                m_CombatHud.ShowBanner("Debug menu", 0.8f);
+                return true;
             }
 
             if (!TryReadDebugComboDirectionThisFrame(out var direction))
@@ -1816,6 +1874,59 @@ namespace VRCombat.Core
             }
 
             m_DebugMenuComboIndex = direction == s_DebugMenuComboSequence[0] ? 1 : 0;
+            return false;
+        }
+
+        bool WasDebugMenuDirectTogglePressedThisFrame()
+        {
+            var keyboard = Keyboard.current;
+            if (Input.GetKeyDown(KeyCode.F9) || (keyboard != null && keyboard.f9Key.wasPressedThisFrame))
+                return true;
+
+            var isPressed = IsDebugThumbstickClickComboPressed();
+            var wasPressed = m_WasDebugThumbstickClickComboPressed;
+            m_WasDebugThumbstickClickComboPressed = isPressed;
+            return isPressed && !wasPressed;
+        }
+
+        bool IsDebugThumbstickClickComboPressed()
+        {
+            var leftPressed = IsXrThumbstickClickPressed(XRNode.LeftHand);
+            var rightPressed = IsXrThumbstickClickPressed(XRNode.RightHand);
+
+            var gamepad = Gamepad.current;
+            if (gamepad != null)
+            {
+                leftPressed |= gamepad.leftStickButton.isPressed;
+                rightPressed |= gamepad.rightStickButton.isPressed;
+            }
+
+            return leftPressed && rightPressed;
+        }
+
+        static bool IsXrThumbstickClickPressed(XRNode node)
+        {
+            s_ControllerDeviceBuffer.Clear();
+            InputDevices.GetDevicesAtXRNode(node, s_ControllerDeviceBuffer);
+            for (var i = 0; i < s_ControllerDeviceBuffer.Count; i++)
+            {
+                var device = s_ControllerDeviceBuffer[i];
+                if (!device.isValid)
+                    continue;
+
+                if (device.TryGetFeatureValue(XRCommonUsages.primary2DAxisClick, out var thumbstickPressed) && thumbstickPressed)
+                    return true;
+
+                if (device.TryGetFeatureValue(new InputFeatureUsage<bool>("primary2DAxisClick"), out var primaryAxisClick) && primaryAxisClick)
+                    return true;
+
+                if (device.TryGetFeatureValue(new InputFeatureUsage<bool>("thumbstickClicked"), out var thumbstickClicked) && thumbstickClicked)
+                    return true;
+
+                if (device.TryGetFeatureValue(new InputFeatureUsage<bool>("joystickClicked"), out var joystickClicked) && joystickClicked)
+                    return true;
+            }
+
             return false;
         }
 
@@ -1945,8 +2056,7 @@ namespace VRCombat.Core
         static bool WasPauseRestartShortcutPressedThisFrame()
         {
             return Input.GetKeyDown(KeyCode.R) ||
-                   (Keyboard.current != null && Keyboard.current.rKey.wasPressedThisFrame) ||
-                   (Gamepad.current != null && Gamepad.current.buttonNorth.wasPressedThisFrame);
+                   (Keyboard.current != null && Keyboard.current.rKey.wasPressedThisFrame);
         }
 
         static float ReadPauseVignetteStepThisFrame()
@@ -2003,8 +2113,7 @@ namespace VRCombat.Core
                     "MetaQuestTouchPlusController"
                 };
                 var handUsages = new[] { "LeftHand", "RightHand" };
-                var menuControls = new[] { "menu", "menuButton", "systemButton", "start", "startButton", "secondaryButton" };
-                var thumbstickControls = new[] { "primary2DAxisClick", "thumbstickClicked", "joystickClicked" };
+                var menuControls = new[] { "menu", "menuButton", "systemButton", "start", "startButton" };
 
                 for (var layoutIndex = 0; layoutIndex < controllerLayouts.Length; layoutIndex++)
                 {
@@ -2016,13 +2125,6 @@ namespace VRCombat.Core
                             $"<{layout}>/{menuControls[controlIndex]}");
                     }
 
-                    for (var controlIndex = 0; controlIndex < thumbstickControls.Length; controlIndex++)
-                    {
-                        UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(
-                            m_RuntimePauseMenuAction,
-                            $"<{layout}>/{thumbstickControls[controlIndex]}");
-                    }
-
                     for (var handIndex = 0; handIndex < handUsages.Length; handIndex++)
                     {
                         var handUsage = handUsages[handIndex];
@@ -2032,22 +2134,7 @@ namespace VRCombat.Core
                                 m_RuntimePauseMenuAction,
                                 $"<{layout}>{{{handUsage}}}/{menuControls[controlIndex]}");
                         }
-
-                        for (var controlIndex = 0; controlIndex < thumbstickControls.Length; controlIndex++)
-                        {
-                            UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(
-                                m_RuntimePauseMenuAction,
-                                $"<{layout}>{{{handUsage}}}/{thumbstickControls[controlIndex]}");
-                        }
                     }
-                }
-
-                // Quest Touch Plus reports the hamburger/menu button as secondaryButton on the left controller.
-                for (var layoutIndex = 0; layoutIndex < controllerLayouts.Length; layoutIndex++)
-                {
-                    UnityEngine.InputSystem.InputActionSetupExtensions.AddBinding(
-                        m_RuntimePauseMenuAction,
-                        $"<{controllerLayouts[layoutIndex]}>{{LeftHand}}/secondaryButton");
                 }
             }
 
@@ -2099,7 +2186,7 @@ namespace VRCombat.Core
                 var pauseAction = new ControllerButtonsMapper.ButtonClickAction
                 {
                     Title = PauseMapperActionTitle,
-                    Button = OVRInput.Button.PrimaryThumbstick,
+                    Button = OVRInput.Button.Start,
                     ButtonMode = ControllerButtonsMapper.ButtonClickAction.ButtonClickMode.OnButtonDown,
                     Callback = callbackEvent
                 };
@@ -2152,9 +2239,6 @@ namespace VRCombat.Core
 
                 if (WasAnyMenuControlPressedThisFrame(device))
                     return true;
-
-                if (IsLikelyHandInputSystemDevice(device) && WasAnyThumbstickPauseControlPressedThisFrame(device))
-                    return true;
             }
 
             return false;
@@ -2166,13 +2250,6 @@ namespace VRCombat.Core
                 || WasInputSystemButtonPressedThisFrame(device, "menuButton")
                 || WasInputSystemButtonPressedThisFrame(device, "systemButton")
                 || WasInputSystemButtonPressedThisFrame(device, "start");
-        }
-
-        static bool WasAnyThumbstickPauseControlPressedThisFrame(UnityEngine.InputSystem.InputDevice device)
-        {
-            return WasInputSystemButtonPressedThisFrame(device, "primary2DAxisClick")
-                || WasInputSystemButtonPressedThisFrame(device, "thumbstickClicked")
-                || WasInputSystemButtonPressedThisFrame(device, "joystickClicked");
         }
 
         static bool WasInputSystemButtonPressedThisFrame(UnityEngine.InputSystem.InputDevice device, string controlPath)
@@ -2277,15 +2354,7 @@ namespace VRCombat.Core
             return IsInputSystemButtonPressed(device, "menu")
                 || IsInputSystemButtonPressed(device, "menuButton")
                 || IsInputSystemButtonPressed(device, "systemButton")
-                || IsInputSystemButtonPressed(device, "start")
-                || IsInputSystemPauseFallbackPressed(device);
-        }
-
-        static bool IsInputSystemPauseFallbackPressed(UnityEngine.InputSystem.InputDevice device)
-        {
-            return IsInputSystemButtonPressed(device, "primary2DAxisClick")
-                || IsInputSystemButtonPressed(device, "thumbstickClicked")
-                || IsInputSystemButtonPressed(device, "joystickClicked");
+                || IsInputSystemButtonPressed(device, "start");
         }
 
         void LogPauseInputDiagnosticsAtStartup()
@@ -2347,14 +2416,7 @@ namespace VRCombat.Core
             try
             {
                 return OVRInput.GetDown(OVRInput.Button.Start) ||
-                       OVRInput.GetDown(OVRInput.RawButton.Start) ||
-                       OVRInput.GetDown(OVRInput.Button.Three, OVRInput.Controller.LTouch) ||
-                       OVRInput.GetDown(OVRInput.RawButton.Y) ||
-                       OVRInput.GetDown(OVRInput.Button.Two, OVRInput.Controller.LTouch) ||
-                       OVRInput.GetDown(OVRInput.Button.PrimaryThumbstick) ||
-                       OVRInput.GetDown(OVRInput.Button.SecondaryThumbstick) ||
-                       OVRInput.GetDown(OVRInput.RawButton.LThumbstick) ||
-                       OVRInput.GetDown(OVRInput.RawButton.RThumbstick);
+                       OVRInput.GetDown(OVRInput.RawButton.Start);
             }
             catch
             {
@@ -2370,7 +2432,7 @@ namespace VRCombat.Core
                     m_LeftControllerTransform,
                     out var resolvedLeftDevice))
             {
-                if (IsMenuSpecificButtonPressed(resolvedLeftDevice) || IsPauseFallbackThumbstickPressed(resolvedLeftDevice))
+                if (IsMenuSpecificButtonPressed(resolvedLeftDevice))
                     return true;
             }
 
@@ -2380,7 +2442,7 @@ namespace VRCombat.Core
                     m_RightControllerTransform,
                     out var resolvedRightDevice))
             {
-                if (IsMenuSpecificButtonPressed(resolvedRightDevice) || IsPauseFallbackThumbstickPressed(resolvedRightDevice))
+                if (IsMenuSpecificButtonPressed(resolvedRightDevice))
                     return true;
             }
 
@@ -2413,22 +2475,6 @@ namespace VRCombat.Core
                     || OVRInput.Get(OVRInput.RawButton.Start))
                     return true;
 
-                // Quest 3 left controller hamburger/menu button (Button.Three on left hand)
-                if (OVRInput.Get(OVRInput.Button.Three, OVRInput.Controller.LTouch)
-                    || OVRInput.Get(OVRInput.RawButton.Y))
-                    return true;
-
-                // Also check for Menu button explicitly
-                if (OVRInput.Get(OVRInput.Button.Two, OVRInput.Controller.LTouch))
-                    return true;
-
-                if (OVRInput.Get(OVRInput.Button.PrimaryThumbstick)
-                    || OVRInput.Get(OVRInput.Button.SecondaryThumbstick)
-                    || OVRInput.Get(OVRInput.RawButton.LThumbstick)
-                    || OVRInput.Get(OVRInput.RawButton.RThumbstick))
-                {
-                    return true;
-                }
             }
             catch
             {
@@ -2456,35 +2502,15 @@ namespace VRCombat.Core
                 handednessFlag |
                 InputDeviceCharacteristics.Controller |
                 InputDeviceCharacteristics.TrackedDevice;
-            if (IsAnyMenuSpecificButtonPressed(controllerCharacteristics) ||
-                IsAnyPauseFallbackThumbstickPressed(controllerCharacteristics))
-            {
+            if (IsAnyMenuSpecificButtonPressed(controllerCharacteristics))
                 return true;
-            }
 
             var controllerOnlyCharacteristics = handednessFlag | InputDeviceCharacteristics.Controller;
-            if (IsAnyMenuSpecificButtonPressed(controllerOnlyCharacteristics) ||
-                IsAnyPauseFallbackThumbstickPressed(controllerOnlyCharacteristics))
-            {
+            if (IsAnyMenuSpecificButtonPressed(controllerOnlyCharacteristics))
                 return true;
-            }
 
             var trackedOnlyCharacteristics = handednessFlag | InputDeviceCharacteristics.TrackedDevice;
-            return IsAnyMenuSpecificButtonPressed(trackedOnlyCharacteristics) ||
-                   IsAnyPauseFallbackThumbstickPressed(trackedOnlyCharacteristics);
-        }
-
-        static bool IsAnyPauseFallbackThumbstickPressed(InputDeviceCharacteristics desiredCharacteristics)
-        {
-            s_ControllerDeviceBuffer.Clear();
-            InputDevices.GetDevicesWithCharacteristics(desiredCharacteristics, s_ControllerDeviceBuffer);
-            for (var i = 0; i < s_ControllerDeviceBuffer.Count; i++)
-            {
-                if (IsPauseFallbackThumbstickPressed(s_ControllerDeviceBuffer[i]))
-                    return true;
-            }
-
-            return false;
+            return IsAnyMenuSpecificButtonPressed(trackedOnlyCharacteristics);
         }
 
         void LogPauseAttemptDiagnostics(bool runtimeActionPressed, bool rawMenuPressed)
@@ -2660,26 +2686,6 @@ namespace VRCombat.Core
             return false;
         }
 
-        static bool IsPauseFallbackThumbstickPressed(XRInputDevice device)
-        {
-            if (!device.isValid)
-                return false;
-
-            if (device.TryGetFeatureValue(XRCommonUsages.primary2DAxisClick, out var thumbstickPressed) && thumbstickPressed)
-                return true;
-
-            if (device.TryGetFeatureValue(new InputFeatureUsage<bool>("primary2DAxisClick"), out var thumbstickPressedByName) && thumbstickPressedByName)
-                return true;
-
-            if (device.TryGetFeatureValue(new InputFeatureUsage<bool>("thumbstickClicked"), out var thumbstickClicked) && thumbstickClicked)
-                return true;
-
-            if (device.TryGetFeatureValue(new InputFeatureUsage<bool>("joystickClicked"), out var joystickClicked) && joystickClicked)
-                return true;
-
-            return false;
-        }
-
         void SetupPlayerDamageDetection()
         {
             var cameraObject = m_PlayerCamera.gameObject;
@@ -2827,7 +2833,8 @@ namespace VRCombat.Core
                 DebugUnlockSpell,
                 DebugGrantAllWeapons,
                 DebugKillAllEnemies,
-                DebugSetWaveNumber);
+                DebugSetWaveNumber,
+                DebugSpawnMahmutCanKovanCard);
 
             if (m_PlayerDamageReceiver == null)
                 return;
@@ -3107,6 +3114,7 @@ namespace VRCombat.Core
         void HandleRunProgressionChanged()
         {
             ApplyPlayerSpeedMultiplier();
+            ApplyMahmutCanKovanRuntimeEffects();
             RefreshRunInteractionState();
         }
 
@@ -3148,10 +3156,6 @@ namespace VRCombat.Core
             var locomotionProviders = FindObjectsByType<LocomotionProvider>(FindObjectsInactive.Include, FindObjectsSortMode.None);
             for (var i = 0; i < locomotionProviders.Length; i++)
                 RegisterLocomotionBehaviour(locomotionProviders[i], previousDefaultStates, previousBaseMoveSpeed);
-
-            var teleportationAreas = FindObjectsByType<TeleportationArea>(FindObjectsInactive.Include, FindObjectsSortMode.None);
-            for (var i = 0; i < teleportationAreas.Length; i++)
-                RegisterLocomotionBehaviour(teleportationAreas[i], previousDefaultStates, previousBaseMoveSpeed);
 
             if (m_PlayerRoot != null)
             {
@@ -3196,7 +3200,10 @@ namespace VRCombat.Core
             if (behaviour == null)
                 return false;
 
-            if (behaviour is LocomotionProvider || behaviour is TeleportationArea)
+            if (behaviour is TeleportationProvider || behaviour is TeleportationArea)
+                return false;
+
+            if (behaviour is LocomotionProvider)
                 return true;
 
             var type = behaviour.GetType();
@@ -3231,6 +3238,145 @@ namespace VRCombat.Core
                     continue;
 
                 TrySetMemberValue(pair.Key, "moveSpeed", pair.Value * speedMultiplier);
+            }
+        }
+
+        void ApplyMahmutCanKovanRuntimeEffects()
+        {
+            var isActive = m_RunProgressionController != null && m_RunProgressionController.HasMahmutCanKovanEasterEgg;
+            if (isActive)
+                ApplyMahmutCanKovanCameraRendering();
+            else
+                RestoreMahmutCanKovanCameraRendering();
+
+            ApplyMahmutCanKovanFlintlockMode(isActive);
+        }
+
+        void ApplyMahmutCanKovanCameraRendering()
+        {
+            if (m_PlayerCamera == null)
+                return;
+
+            if (m_MahmutCanKovanLeftEyeBlackoutObject == null)
+                CreateMahmutCanKovanLeftEyeBlackout();
+
+            RefreshMahmutCanKovanLeftEyeBlackout();
+        }
+
+        void RestoreMahmutCanKovanCameraRendering()
+        {
+            if (m_MahmutCanKovanLeftEyeBlackoutObject != null)
+                Destroy(m_MahmutCanKovanLeftEyeBlackoutObject);
+
+            if (m_MahmutCanKovanLeftEyeBlackoutMaterial != null)
+                Destroy(m_MahmutCanKovanLeftEyeBlackoutMaterial);
+
+            if (m_MahmutCanKovanLeftEyeBlackoutMesh != null)
+                Destroy(m_MahmutCanKovanLeftEyeBlackoutMesh);
+
+            m_MahmutCanKovanLeftEyeBlackoutObject = null;
+            m_MahmutCanKovanLeftEyeBlackoutMesh = null;
+            m_MahmutCanKovanLeftEyeBlackoutRenderer = null;
+            m_MahmutCanKovanLeftEyeBlackoutMaterial = null;
+        }
+
+        void CreateMahmutCanKovanLeftEyeBlackout()
+        {
+            if (m_PlayerCamera == null)
+                return;
+
+            var shader = Resources.Load<Shader>(MahmutCanKovanLeftEyeBlackoutShaderResourcePath) ??
+                         Shader.Find(MahmutCanKovanLeftEyeBlackoutShaderName);
+            if (shader == null)
+            {
+                Debug.LogWarning($"[VRCombat] Could not load {MahmutCanKovanLeftEyeBlackoutShaderName}; left-eye blackout is disabled.");
+                return;
+            }
+
+            var blackoutObject = new GameObject("MahmutCanKovan Left Eye Blackout Overlay");
+            blackoutObject.transform.SetParent(m_PlayerCamera.transform, false);
+            blackoutObject.transform.localPosition = Vector3.forward * 0.2f;
+            blackoutObject.transform.localRotation = Quaternion.identity;
+            blackoutObject.transform.localScale = Vector3.one;
+            blackoutObject.layer = m_PlayerCamera.gameObject.layer;
+
+            var mesh = new Mesh
+            {
+                name = "MahmutCanKovan Left Eye Blackout Quad",
+                vertices = new[]
+                {
+                    new Vector3(-0.5f, -0.5f, 0f),
+                    new Vector3(-0.5f, 0.5f, 0f),
+                    new Vector3(0.5f, 0.5f, 0f),
+                    new Vector3(0.5f, -0.5f, 0f)
+                },
+                triangles = new[] { 0, 1, 2, 0, 2, 3 },
+                uv = new[]
+                {
+                    new Vector2(0f, 0f),
+                    new Vector2(0f, 1f),
+                    new Vector2(1f, 1f),
+                    new Vector2(1f, 0f)
+                }
+            };
+            mesh.RecalculateBounds();
+
+            var meshFilter = blackoutObject.AddComponent<MeshFilter>();
+            meshFilter.sharedMesh = mesh;
+
+            var material = new Material(shader)
+            {
+                name = "MahmutCanKovan Left Eye Blackout Material",
+                renderQueue = 5000
+            };
+            material.enableInstancing = true;
+
+            var meshRenderer = blackoutObject.AddComponent<MeshRenderer>();
+            meshRenderer.sharedMaterial = material;
+            meshRenderer.shadowCastingMode = ShadowCastingMode.Off;
+            meshRenderer.receiveShadows = false;
+            meshRenderer.allowOcclusionWhenDynamic = false;
+            meshRenderer.lightProbeUsage = LightProbeUsage.Off;
+            meshRenderer.reflectionProbeUsage = ReflectionProbeUsage.Off;
+            meshRenderer.sortingOrder = short.MaxValue;
+            blackoutObject.AddComponent<LeftEyeOnlyRendererGate>().Configure(meshRenderer);
+
+            m_MahmutCanKovanLeftEyeBlackoutObject = blackoutObject;
+            m_MahmutCanKovanLeftEyeBlackoutMesh = mesh;
+            m_MahmutCanKovanLeftEyeBlackoutRenderer = meshRenderer;
+            m_MahmutCanKovanLeftEyeBlackoutMaterial = material;
+            RegisterRuntimeObject(blackoutObject);
+            RefreshMahmutCanKovanLeftEyeBlackout();
+        }
+
+        void RefreshMahmutCanKovanLeftEyeBlackout()
+        {
+            if (m_MahmutCanKovanLeftEyeBlackoutObject == null || m_PlayerCamera == null)
+                return;
+
+            var blackoutTransform = m_MahmutCanKovanLeftEyeBlackoutObject.transform;
+            blackoutTransform.SetParent(m_PlayerCamera.transform, false);
+            var overlayDistance = Mathf.Max(m_PlayerCamera.nearClipPlane + 0.1f, 0.2f);
+            blackoutTransform.localPosition = Vector3.forward * overlayDistance;
+            blackoutTransform.localRotation = Quaternion.identity;
+            var halfFovRadians = Mathf.Clamp(m_PlayerCamera.fieldOfView, 1f, 179f) * 0.5f * Mathf.Deg2Rad;
+            var overlayHeight = Mathf.Tan(halfFovRadians) * overlayDistance * 2f;
+            var overlayWidth = overlayHeight * Mathf.Max(0.01f, m_PlayerCamera.aspect);
+            const float overlayOverscan = 1.5f;
+            blackoutTransform.localScale = new Vector3(overlayWidth * overlayOverscan, overlayHeight * overlayOverscan, 1f);
+
+            if (m_MahmutCanKovanLeftEyeBlackoutRenderer != null)
+                m_MahmutCanKovanLeftEyeBlackoutRenderer.enabled = true;
+        }
+
+        void ApplyMahmutCanKovanFlintlockMode(bool enabled)
+        {
+            var flintlocks = FindObjectsByType<FlintlockWeapon>(FindObjectsInactive.Include, FindObjectsSortMode.None);
+            for (var i = 0; i < flintlocks.Length; i++)
+            {
+                var flintlock = flintlocks[i];
+                if (flintlock != null)
+                    flintlock.SetMahmutCanKovanMode(enabled);
             }
         }
 
@@ -3624,6 +3770,49 @@ namespace VRCombat.Core
             m_CombatHud?.ShowBanner($"Debug spell: {spellName}", 0.9f);
         }
 
+        void DebugSpawnMahmutCanKovanCard()
+        {
+            if (!TryGetDebugRewardPose(0, out var spawnPosition, out var spawnRotation))
+                return;
+
+            spawnPosition += Vector3.up * 0.05f;
+            var cardObject = CardTableRuntime.CreateLooseCard(
+                RunCatalog.MahmutCanKovanCard,
+                spawnPosition,
+                spawnRotation,
+                m_RunProgressionController,
+                this,
+                m_MaxPhysicalGrabDistance);
+            if (cardObject == null)
+            {
+                m_CombatHud?.ShowBanner("Could not spawn MahmutCanKovan", 1f);
+                return;
+            }
+
+            RegisterRuntimeObject(cardObject);
+            m_CombatHud?.ShowBanner("MahmutCanKovan card spawned", 1f);
+        }
+
+        public void ActivateSpecialCard(CardDefinition cardDefinition)
+        {
+            if (cardDefinition == null)
+                return;
+
+            if (!string.Equals(cardDefinition.Id, RunCatalog.MahmutCanKovanCard.Id, StringComparison.Ordinal))
+                return;
+
+            if (m_RunProgressionController == null)
+            {
+                m_RunProgressionController = GetComponent<RunProgressionController>() ?? gameObject.AddComponent<RunProgressionController>();
+                m_RunProgressionController.Initialize(m_CombatHud);
+            }
+
+            var activatedNow = m_RunProgressionController.ActivateMahmutCanKovanEasterEgg();
+            ApplyPlayerSpeedMultiplier();
+            ApplyMahmutCanKovanRuntimeEffects();
+            m_CombatHud?.ShowBanner(activatedNow ? "MahmutCanKovan activated" : "MahmutCanKovan already active", 1.4f);
+        }
+
         bool TryGetDebugRewardPose(int slotIndex, out Vector3 position, out Quaternion rotation)
         {
             var referenceTransform = m_PlayerCamera != null ? m_PlayerCamera.transform : transform;
@@ -3782,6 +3971,7 @@ namespace VRCombat.Core
                 m_ShouldContinueAfterVictory = false;
 
                 RestoreSuppressedHandRenderers();
+                RestoreMahmutCanKovanCameraRendering();
                 DestroyRuntimeCombatObjects();
                 DestroyLegacyStickObjects();
                 ConfigureArenaSurface();
@@ -3874,8 +4064,11 @@ namespace VRCombat.Core
             for (var i = 0; i < flintlocks.Length; i++)
             {
                 var flintlock = flintlocks[i];
-                if (flintlock != null)
-                    flintlock.ResetWeaponState();
+                if (flintlock == null)
+                    continue;
+
+                flintlock.SetMahmutCanKovanMode(false);
+                flintlock.ResetWeaponState();
             }
         }
 
@@ -3941,8 +4134,7 @@ namespace VRCombat.Core
             if (arenaRoot != null)
                 TryConfigureKillZoneFromArena(arenaRoot);
 
-            if (arenaRoot != null && TryFindPrimaryTeleportationArea(out var teleportationArea))
-                ConfigureArenaTeleportationArea(arenaRoot, teleportationArea);
+            DisableGameplayTeleportation();
         }
 
         void AddPlatformRootSurfaces(Transform platformRoot)
@@ -4507,6 +4699,70 @@ namespace VRCombat.Core
             }
 
             return teleportationArea != null;
+        }
+
+        void DisableGameplayTeleportation()
+        {
+            var teleportationAreas = FindObjectsByType<TeleportationArea>(FindObjectsInactive.Include, FindObjectsSortMode.None);
+            for (var i = 0; i < teleportationAreas.Length; i++)
+            {
+                var teleportationArea = teleportationAreas[i];
+                if (teleportationArea == null)
+                    continue;
+
+                teleportationArea.enabled = false;
+                teleportationArea.colliders.Clear();
+            }
+
+            var teleportationProviders = FindObjectsByType<TeleportationProvider>(FindObjectsInactive.Include, FindObjectsSortMode.None);
+            for (var i = 0; i < teleportationProviders.Length; i++)
+            {
+                if (teleportationProviders[i] != null)
+                    teleportationProviders[i].enabled = false;
+            }
+
+            if (m_RuntimeArenaTeleportCollider != null)
+                m_RuntimeArenaTeleportCollider.enabled = false;
+
+            DisableTeleportVisualsUnderPlayerRig();
+        }
+
+        void DisableTeleportVisualsUnderPlayerRig()
+        {
+            if (m_PlayerRoot == null)
+                return;
+
+            var behaviours = m_PlayerRoot.GetComponentsInChildren<Behaviour>(true);
+            for (var i = 0; i < behaviours.Length; i++)
+            {
+                var behaviour = behaviours[i];
+                if (behaviour == null || behaviour is ControllerInputActionManager)
+                    continue;
+
+                var typeName = behaviour.GetType().Name;
+                var objectName = behaviour.name;
+                var shouldDisable =
+                    ContainsTeleportOrBlinkToken(typeName) ||
+                    ContainsTeleportOrBlinkToken(objectName) ||
+                    ContainsTeleportOrBlinkToken(GetTransformPath(behaviour.transform));
+                if (shouldDisable)
+                    behaviour.enabled = false;
+            }
+
+            var renderers = m_PlayerRoot.GetComponentsInChildren<Renderer>(true);
+            for (var i = 0; i < renderers.Length; i++)
+            {
+                var renderer = renderers[i];
+                if (renderer != null && ContainsTeleportOrBlinkToken(GetTransformPath(renderer.transform)))
+                    renderer.enabled = false;
+            }
+        }
+
+        static bool ContainsTeleportOrBlinkToken(string value)
+        {
+            return !string.IsNullOrWhiteSpace(value) &&
+                   (value.IndexOf("teleport", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    value.IndexOf("blink", StringComparison.OrdinalIgnoreCase) >= 0);
         }
 
         void ConfigureArenaTeleportationArea(Transform arenaRoot, TeleportationArea teleportationArea)
@@ -7075,6 +7331,7 @@ namespace VRCombat.Core
                 weapon = root.AddComponent<FlintlockWeapon>();
 
             weapon.ConfigureRuntimeSetup(bulletVisual, raycastOriginTransform, visualTrigger, m_RunProgressionController);
+            weapon.SetMahmutCanKovanMode(m_RunProgressionController != null && m_RunProgressionController.FlintlockReloadsDisabled);
             return weapon;
         }
 
@@ -10142,6 +10399,35 @@ namespace VRCombat.Core
             {
                 return null;
             }
+        }
+    }
+
+    [DisallowMultipleComponent]
+    sealed class LeftEyeOnlyRendererGate : MonoBehaviour
+    {
+        Renderer m_Renderer;
+
+        public void Configure(Renderer targetRenderer)
+        {
+            m_Renderer = targetRenderer;
+        }
+
+        void OnWillRenderObject()
+        {
+            if (m_Renderer == null)
+                return;
+
+            var currentCamera = Camera.current;
+            if (currentCamera == null)
+                return;
+
+            m_Renderer.enabled = currentCamera.stereoActiveEye != Camera.MonoOrStereoscopicEye.Right;
+        }
+
+        void LateUpdate()
+        {
+            if (m_Renderer != null)
+                m_Renderer.enabled = true;
         }
     }
 

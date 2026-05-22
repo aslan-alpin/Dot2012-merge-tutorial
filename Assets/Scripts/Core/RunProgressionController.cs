@@ -22,6 +22,7 @@ namespace VRCombat.Core
         int m_PendingUpgradeChoices;
         int m_SelectedSpellIndex = -1;
         bool m_IsChoosingUpgrade;
+        bool m_MahmutCanKovanActive;
 
         public event Action ProgressionChanged;
         public event Action<SpellKind> SelectedSpellChanged;
@@ -30,6 +31,9 @@ namespace VRCombat.Core
         public int CurrentXp => m_CurrentXp;
         public int NextLevelXp => m_NextLevelXp;
         public bool IsUpgradeSelectionActive => m_IsChoosingUpgrade;
+        public bool HasMahmutCanKovanEasterEgg => m_MahmutCanKovanActive;
+        public bool SpellCooldownsDisabled => m_MahmutCanKovanActive;
+        public bool FlintlockReloadsDisabled => m_MahmutCanKovanActive;
         public SpellKind SelectedSpellKind => m_SelectedSpellIndex >= 0 && m_SelectedSpellIndex < m_UnlockedSpells.Count
             ? m_UnlockedSpells[m_SelectedSpellIndex]
             : SpellKind.None;
@@ -49,6 +53,7 @@ namespace VRCombat.Core
             m_PendingUpgradeChoices = 0;
             m_SelectedSpellIndex = -1;
             m_IsChoosingUpgrade = false;
+            m_MahmutCanKovanActive = false;
             m_UpgradeStacks.Clear();
             m_OwnedWeapons.Clear();
             m_UnlockedSpells.Clear();
@@ -81,6 +86,16 @@ namespace VRCombat.Core
                 m_UpgradeStacks[upgradeKind] = stacksToAdd;
 
             RefreshHud();
+            RaiseProgressionChanged();
+            return true;
+        }
+
+        public bool ActivateMahmutCanKovanEasterEgg()
+        {
+            if (m_MahmutCanKovanActive)
+                return false;
+
+            m_MahmutCanKovanActive = true;
             RaiseProgressionChanged();
             return true;
         }
@@ -173,7 +188,10 @@ namespace VRCombat.Core
 
         public float GetPlayerSpeedMultiplier()
         {
-            return 1f + GetUpgradeStacks(UpgradeKind.PlayerSpeed) * 0.1f;
+            var multiplier = 1f + GetUpgradeStacks(UpgradeKind.PlayerSpeed) * 0.1f;
+            if (m_MahmutCanKovanActive)
+                multiplier *= 2f;
+            return multiplier;
         }
 
         public float GetShieldKnockbackDamageMultiplier()
@@ -192,12 +210,17 @@ namespace VRCombat.Core
                 totalMultiplier *= 1f + GetUpgradeStacks(UpgradeKind.AllMeleeDamage) * 0.1f;
 
             totalMultiplier *= 1f + GetSpecificWeaponUpgradeStacks(weaponKind) * 0.15f;
+            if (m_MahmutCanKovanActive && RunCatalog.IsMeleeWeapon(weaponKind))
+                totalMultiplier *= 2f;
             return totalMultiplier;
         }
 
         public float GetSpellDamageMultiplier(SpellKind spellKind)
         {
-            return 1f + GetSpecificSpellUpgradeStacks(spellKind) * 0.15f;
+            var multiplier = 1f + GetSpecificSpellUpgradeStacks(spellKind) * 0.15f;
+            if (m_MahmutCanKovanActive)
+                multiplier *= 2f;
+            return multiplier;
         }
 
         void RebuildRunCardPool()

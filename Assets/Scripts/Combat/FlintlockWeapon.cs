@@ -95,6 +95,7 @@ namespace VRCombat.Combat
         bool m_IsReloading;
         bool m_WasHeldTriggerPressed;
         bool m_WasHeldReloadPressed;
+        bool m_MahmutCanKovanMode;
         float m_ReloadCompleteTime = -1f;
         static readonly RaycastHit[] s_ShotHitBuffer = new RaycastHit[16];
 
@@ -103,6 +104,20 @@ namespace VRCombat.Combat
         public void ConfigureRuntimeModifiers(RunProgressionController progressionController)
         {
             m_ProgressionController = progressionController;
+            SetMahmutCanKovanMode(m_ProgressionController != null && m_ProgressionController.FlintlockReloadsDisabled);
+        }
+
+        public void SetMahmutCanKovanMode(bool enabled)
+        {
+            m_MahmutCanKovanMode = enabled;
+            if (!enabled)
+                return;
+
+            m_IsReloading = false;
+            m_ReloadCompleteTime = -1f;
+            m_IsLoaded = true;
+            RestoreAttachedBulletVisual();
+            SetLoadedVisualState();
         }
 
         public void ConfigureRuntimeSetup(
@@ -133,6 +148,7 @@ namespace VRCombat.Combat
             EnsureAttachedBulletTemplate();
             ConfigureTriggerAnimation();
             ResetWeaponState();
+            SetMahmutCanKovanMode(m_ProgressionController != null && m_ProgressionController.FlintlockReloadsDisabled);
         }
 
         void Awake()
@@ -205,7 +221,11 @@ namespace VRCombat.Combat
             }
 
             m_HoldingInteractor ??= m_Interactable.firstInteractorSelecting;
-            RefreshHeldDevice();
+            if (!RefreshHeldDevice())
+            {
+                UpdateTriggerVisual(0f);
+                return;
+            }
 
             var heldTriggerValue = Mathf.Clamp01(ReadHeldTriggerValue());
             UpdateTriggerVisual(heldTriggerValue);
@@ -234,24 +254,36 @@ namespace VRCombat.Combat
             m_HoldingInteractor = args.interactorObject;
             m_HasHeldHandNode = TryResolveHeldHandNode(args.interactorObject, out m_HeldHandNode);
             m_HeldDevice = default;
-            RefreshHeldDevice();
-            UpdateTriggerVisual(Mathf.Clamp01(ReadHeldTriggerValue()));
+            UpdateTriggerVisual(RefreshHeldDevice() ? Mathf.Clamp01(ReadHeldTriggerValue()) : 0f);
             m_WasHeldTriggerPressed = false;
             m_WasHeldReloadPressed = false;
         }
 
         void OnSelectExited(SelectExitEventArgs args)
         {
+            if (!IsCurrentHoldingInteractor(args.interactorObject))
+                return;
+
             ClearHeldState();
         }
 
         void OnActivated(ActivateEventArgs args)
         {
+            if (!IsCurrentHoldingInteractor(args.interactorObject))
+                return;
+
             if (args.interactorObject is IXRSelectInteractor selectInteractor)
                 m_HoldingInteractor = selectInteractor;
 
             if (!m_HasHeldHandNode)
                 m_HasHeldHandNode = TryResolveHeldHandNode(args.interactorObject, out m_HeldHandNode);
+            if (!RefreshHeldDevice())
+                return;
+
+            var heldTriggerValue = Mathf.Clamp01(ReadHeldTriggerValue());
+            UpdateTriggerVisual(heldTriggerValue);
+            if (heldTriggerValue < GetEffectiveFireThreshold())
+                return;
 
             m_WasHeldTriggerPressed = true;
             Fire();
@@ -259,8 +291,10 @@ namespace VRCombat.Combat
 
         void OnDeactivated(DeactivateEventArgs args)
         {
-            if (m_HoldingInteractor == null || args.interactorObject == m_HoldingInteractor)
-                m_WasHeldTriggerPressed = false;
+            if (!IsCurrentHoldingInteractor(args.interactorObject))
+                return;
+
+            m_WasHeldTriggerPressed = false;
         }
 
         void ConfigureGrabInteractable()
@@ -397,39 +431,33 @@ namespace VRCombat.Combat
             m_TriggerAnimationTransform = pivotTransform;
         }
 
-        void RefreshHeldDevice()
+        bool RefreshHeldDevice()
         {
             if (m_HoldingInteractor == null)
             {
                 m_HeldDevice = default;
                 m_HasHeldHandNode = false;
-                return;
+                return false;
             }
 
-            // Keep trying to resolve hand node each frame until successful
             if (!m_HasHeldHandNode)
             {
                 if (!TryResolveHeldHandNode(m_HoldingInteractor, out m_HeldHandNode))
-                    return;
+                    return false;
                 m_HasHeldHandNode = true;
-                m_HeldDevice = default; // Reset device when hand node changes
+                m_HeldDevice = default;
             }
 
             if (!m_HeldDevice.isValid)
                 m_HeldDevice = InputDevices.GetDeviceAtXRNode(m_HeldHandNode);
+
+            return true;
         }
 
         float ReadHeldTriggerValue()
         {
-            if (m_HoldingInteractor is XRBaseInputInteractor inputInteractor)
-            {
-                var activateValue = inputInteractor.activateInput.ReadValue();
-                if (activateValue > 0f)
-                    return activateValue;
-
-                if (inputInteractor.activateInput.ReadIsPerformed())
-                    return 1f;
-            }
+            if (!m_HasHeldHandNode)
+                return 0f;
 
             var inputSystemTriggerValue = ReadHeldInputSystemTriggerValue();
             if (inputSystemTriggerValue > 0f)
@@ -496,29 +524,6 @@ namespace VRCombat.Combat
             if (bestTriggerValue > 0f)
                 return bestTriggerValue;
 
-            var inputSystemDevices = UnityEngine.InputSystem.InputSystem.devices;
-            for (var i = 0; i < inputSystemDevices.Count; i++)
-            {
-                var device = inputSystemDevices[i];
-                if (!MatchesHandNode(device, m_HeldHandNode))
-                    continue;
-
-                if (TryGetInputSystemAxisValue(device, "trigger", out triggerValue))
-                    bestTriggerValue = Mathf.Max(bestTriggerValue, triggerValue);
-
-                if (TryGetInputSystemAxisValue(device, "triggerPressed", out triggerValue))
-                    bestTriggerValue = Mathf.Max(bestTriggerValue, triggerValue);
-
-                if (TryGetInputSystemAxisValue(device, "triggerButton", out triggerValue))
-                    bestTriggerValue = Mathf.Max(bestTriggerValue, triggerValue);
-
-                if (TryGetInputSystemAxisValue(device, "indexButton", out triggerValue))
-                    bestTriggerValue = Mathf.Max(bestTriggerValue, triggerValue);
-
-                if (bestTriggerValue > 0f)
-                    return bestTriggerValue;
-            }
-
             return bestTriggerValue;
         }
 
@@ -532,20 +537,6 @@ namespace VRCombat.Combat
             {
                 if (IsInputSystemButtonPressed(handController, controlPaths[controlIndex]))
                     return true;
-            }
-
-            var inputSystemDevices = UnityEngine.InputSystem.InputSystem.devices;
-            for (var i = 0; i < inputSystemDevices.Count; i++)
-            {
-                var device = inputSystemDevices[i];
-                if (!MatchesHandNode(device, m_HeldHandNode))
-                    continue;
-
-                for (var controlIndex = 0; controlIndex < controlPaths.Length; controlIndex++)
-                {
-                    if (IsInputSystemButtonPressed(device, controlPaths[controlIndex]))
-                        return true;
-                }
             }
 
             return false;
@@ -590,33 +581,20 @@ namespace VRCombat.Combat
             return buttonControl != null && buttonControl.isPressed;
         }
 
-        static bool MatchesHandNode(UnityEngine.InputSystem.InputDevice device, XRNode handNode)
+        bool IsCurrentHoldingInteractor(object interactorObject)
         {
-            if (device == null)
+            if (m_HoldingInteractor == null && m_Interactable != null)
+                m_HoldingInteractor = m_Interactable.firstInteractorSelecting;
+
+            if (m_HoldingInteractor == null || interactorObject == null)
                 return false;
 
-            var desiredUsage = handNode == XRNode.RightHand ? "RightHand" : "LeftHand";
-            if (HasInputSystemUsage(device, desiredUsage))
+            if (ReferenceEquals(interactorObject, m_HoldingInteractor))
                 return true;
 
-            var descriptor = $"{device.displayName} {device.name} {device.layout}";
-            var handednessToken = handNode == XRNode.RightHand ? "right" : "left";
-            return descriptor.IndexOf(handednessToken, StringComparison.OrdinalIgnoreCase) >= 0;
-        }
-
-        static bool HasInputSystemUsage(UnityEngine.InputSystem.InputDevice device, string usageName)
-        {
-            if (device == null || string.IsNullOrWhiteSpace(usageName))
-                return false;
-
-            var usages = device.usages;
-            for (var i = 0; i < usages.Count; i++)
-            {
-                if (string.Equals(usages[i].ToString(), usageName, StringComparison.OrdinalIgnoreCase))
-                    return true;
-            }
-
-            return false;
+            return interactorObject is Component interactorComponent &&
+                   m_HoldingInteractor is Component holdingComponent &&
+                   interactorComponent == holdingComponent;
         }
 
         bool TryResolveHeldHandNode(IXRInteractor interactor, out XRNode handNode)
@@ -733,7 +711,8 @@ namespace VRCombat.Combat
 
         void Fire()
         {
-            if (!m_IsLoaded || m_IsReloading || !TryCreateProjectileInstance(out var projectileObject))
+            if ((!m_MahmutCanKovanMode && (!m_IsLoaded || m_IsReloading)) ||
+                !TryCreateProjectileInstance(out var projectileObject))
                 return;
 
             var origin = GetFireOrigin();
@@ -762,7 +741,13 @@ namespace VRCombat.Combat
                 Mathf.Max(0.5f, m_ProjectileLifetime),
                 Mathf.Max(0.005f, DefaultProjectileRadius));
 
-            m_IsLoaded = false;
+            m_IsLoaded = m_MahmutCanKovanMode;
+            if (m_MahmutCanKovanMode)
+            {
+                m_IsReloading = false;
+                m_ReloadCompleteTime = -1f;
+                RestoreAttachedBulletVisual();
+            }
             SetLoadedVisualState();
 
             if (muzzleFlash != null)
@@ -1190,6 +1175,16 @@ namespace VRCombat.Combat
 
         public void Reload()
         {
+            if (m_MahmutCanKovanMode)
+            {
+                m_IsReloading = false;
+                m_ReloadCompleteTime = -1f;
+                m_IsLoaded = true;
+                RestoreAttachedBulletVisual();
+                SetLoadedVisualState();
+                return;
+            }
+
             if (m_IsLoaded || m_IsReloading)
                 return;
 
@@ -1200,6 +1195,20 @@ namespace VRCombat.Combat
 
         void UpdateReloadState()
         {
+            if (m_MahmutCanKovanMode)
+            {
+                if (!m_IsLoaded || m_IsReloading)
+                {
+                    m_IsReloading = false;
+                    m_ReloadCompleteTime = -1f;
+                    m_IsLoaded = true;
+                    RestoreAttachedBulletVisual();
+                    SetLoadedVisualState();
+                }
+
+                return;
+            }
+
             if (!m_IsReloading || Time.time < m_ReloadCompleteTime)
                 return;
 
